@@ -15,12 +15,19 @@ public static class WavWriter
     /// </summary>
     public static void WritePcm16(string filePath, ReadOnlySpan<float> samples, int sampleRate = 24000, short channels = 1)
     {
-        using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: false);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(sampleRate);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(channels);
 
         int bytesPerSample = 2; // 16-bit PCM
-        int dataChunkSize = samples.Length * bytesPerSample * channels;
+        long totalBytes = (long)samples.Length * bytesPerSample * channels;
+        if (totalBytes > int.MaxValue - 36)
+            throw new ArgumentOutOfRangeException(nameof(samples), "Audio buffer exceeds maximum WAV file size.");
+
+        int dataChunkSize = (int)totalBytes;
         int fileSize = 36 + dataChunkSize;
+
+        using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: false);
 
         // RIFF header
         writer.Write(Encoding.ASCII.GetBytes("RIFF"));
@@ -33,7 +40,7 @@ public static class WavWriter
         writer.Write((short)1); // Audio format: 1 = PCM
         writer.Write(channels);
         writer.Write(sampleRate);
-        writer.Write(sampleRate * channels * bytesPerSample); // Byte rate
+        writer.Write(checked(sampleRate * channels * bytesPerSample)); // Byte rate
         writer.Write((short)(channels * bytesPerSample)); // Block align
         writer.Write((short)(bytesPerSample * 8)); // Bits per sample
 
@@ -41,12 +48,15 @@ public static class WavWriter
         writer.Write(Encoding.ASCII.GetBytes("data"));
         writer.Write(dataChunkSize);
 
-        // Convert float (-1.0 to +1.0) to 16-bit signed PCM with clipping
+        // Convert float (-1.0 to +1.0) to 16-bit signed PCM with clipping (replicated across channels when channels > 1)
         for (int i = 0; i < samples.Length; i++)
         {
             float s = Math.Clamp(samples[i], -1.0f, 1.0f);
             short pcm = (short)Math.Round(s * 32767.0f);
-            writer.Write(pcm);
+            for (int c = 0; c < channels; c++)
+            {
+                writer.Write(pcm);
+            }
         }
     }
 
@@ -55,12 +65,19 @@ public static class WavWriter
     /// </summary>
     public static void WriteFloat32(string filePath, ReadOnlySpan<float> samples, int sampleRate = 24000, short channels = 1)
     {
-        using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: false);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(sampleRate);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(channels);
 
         int bytesPerSample = 4; // 32-bit float
-        int dataChunkSize = samples.Length * bytesPerSample * channels;
+        long totalBytes = (long)samples.Length * bytesPerSample * channels;
+        if (totalBytes > int.MaxValue - 36)
+            throw new ArgumentOutOfRangeException(nameof(samples), "Audio buffer exceeds maximum WAV file size.");
+
+        int dataChunkSize = (int)totalBytes;
         int fileSize = 36 + dataChunkSize;
+
+        using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
+        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: false);
 
         // RIFF header
         writer.Write(Encoding.ASCII.GetBytes("RIFF"));
@@ -73,7 +90,7 @@ public static class WavWriter
         writer.Write((short)3); // Audio format: 3 = IEEE float
         writer.Write(channels);
         writer.Write(sampleRate);
-        writer.Write(sampleRate * channels * bytesPerSample);
+        writer.Write(checked(sampleRate * channels * bytesPerSample));
         writer.Write((short)(channels * bytesPerSample));
         writer.Write((short)(bytesPerSample * 8));
 
@@ -83,7 +100,10 @@ public static class WavWriter
 
         for (int i = 0; i < samples.Length; i++)
         {
-            writer.Write(samples[i]);
+            for (int c = 0; c < channels; c++)
+            {
+                writer.Write(samples[i]);
+            }
         }
     }
 
@@ -92,8 +112,15 @@ public static class WavWriter
     /// </summary>
     public static byte[] ToPcm16Bytes(ReadOnlySpan<float> samples, int sampleRate = 24000, short channels = 1)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(sampleRate);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(channels);
+
         int bytesPerSample = 2;
-        int dataChunkSize = samples.Length * bytesPerSample * channels;
+        long totalBytes = (long)samples.Length * bytesPerSample * channels;
+        if (totalBytes > int.MaxValue - 44)
+            throw new ArgumentOutOfRangeException(nameof(samples), "Audio buffer exceeds maximum WAV buffer size.");
+
+        int dataChunkSize = (int)totalBytes;
         byte[] buffer = new byte[44 + dataChunkSize];
 
         using var ms = new MemoryStream(buffer);
@@ -108,7 +135,7 @@ public static class WavWriter
         writer.Write((short)1);
         writer.Write(channels);
         writer.Write(sampleRate);
-        writer.Write(sampleRate * channels * bytesPerSample);
+        writer.Write(checked(sampleRate * channels * bytesPerSample));
         writer.Write((short)(channels * bytesPerSample));
         writer.Write((short)(bytesPerSample * 8));
 
@@ -119,7 +146,10 @@ public static class WavWriter
         {
             float s = Math.Clamp(samples[i], -1.0f, 1.0f);
             short pcm = (short)Math.Round(s * 32767.0f);
-            writer.Write(pcm);
+            for (int c = 0; c < channels; c++)
+            {
+                writer.Write(pcm);
+            }
         }
 
         return buffer;

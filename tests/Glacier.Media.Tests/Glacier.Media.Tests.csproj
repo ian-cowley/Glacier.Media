@@ -28,6 +28,6 @@
     <ProjectReference Include="../../../Glacier.Inference/src/Glacier.Inference/Glacier.Inference.csproj" />
   </ItemGroup>
   <ItemGroup Condition="!Exists('../../../Glacier.Inference/src/Glacier.Inference/Glacier.Inference.csproj') or '$(UseLocalProjectReferences)' == 'false'">
-    <PackageReference Include="Glacier.Inference" Version="1.8.0" />
+    <PackageReference Include="Glacier.Inference" Version="1.8.2" />
   </ItemGroup>
 </Project>
