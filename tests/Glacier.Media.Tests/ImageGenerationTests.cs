@@ -3,6 +3,7 @@ namespace Glacier.Media.Tests;
 using System;
 using System.IO;
 using Glacier.Media.Image;
+using Glacier.Media.Image.Flux;
 using Xunit;
 
 #pragma warning disable GLACIER_EXP001
@@ -197,6 +198,71 @@ public class ImageGenerationTests
         finally
         {
             if (File.Exists(tmpFile)) File.Delete(tmpFile);
+        }
+    }
+
+    [Fact]
+    public void ImageDecoder_RejectsMaliciousPngBmpBounds_AndDecodesTopDownBmpCorrectly()
+    {
+        // Truncated PNG chunk length should throw InvalidDataException
+        byte[] badPng =
+        [
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D, (byte)'I', (byte)'H', (byte)'D', (byte)'R',
+            0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x02, 0x00, 0x00, 0x00,
+            0xFD, 0xD4, 0x9A, 0x73,
+            0x7F, 0xFF, 0xFF, 0xFF, (byte)'I', (byte)'D', (byte)'A', (byte)'T', 0x00, 0x00, 0x00, 0x00
+        ];
+        Assert.Throws<InvalidDataException>(() => ImageDecoder.DecodePng(badPng));
+        Assert.Throws<InvalidDataException>(() => ImageDecoder.DecodePngRgba(badPng));
+
+        // Top-down BMP (height = -2, width = 1, 24-bit BGR) + int.MinValue guard
+        byte[] topDownBmp = new byte[54 + 8];
+        topDownBmp[0] = (byte)'B';
+        topDownBmp[1] = (byte)'M';
+        BitConverter.TryWriteBytes(topDownBmp.AsSpan(10, 4), 54); // pixelOffset
+        BitConverter.TryWriteBytes(topDownBmp.AsSpan(18, 4), 1);  // width = 1
+        BitConverter.TryWriteBytes(topDownBmp.AsSpan(22, 4), -2); // top-down height = 2
+        BitConverter.TryWriteBytes(topDownBmp.AsSpan(28, 2), (short)24);
+        // Row 0 (top): R=10, G=20, B=30 (stored BGR)
+        topDownBmp[54] = 30; topDownBmp[55] = 20; topDownBmp[56] = 10;
+        // Row 1 (bottom): R=200, G=100, B=50 (stored BGR)
+        topDownBmp[58] = 50; topDownBmp[59] = 100; topDownBmp[60] = 200;
+
+        var (pixels, w, h) = ImageDecoder.DecodeBmp(topDownBmp);
+        Assert.Equal(1, w);
+        Assert.Equal(2, h);
+        Assert.Equal((byte)10, pixels[0]);
+        Assert.Equal((byte)200, pixels[3]);
+
+        // int.MinValue height guard
+        BitConverter.TryWriteBytes(topDownBmp.AsSpan(22, 4), int.MinValue);
+        Assert.Throws<InvalidDataException>(() => ImageDecoder.DecodeBmp(topDownBmp));
+    }
+
+    [Fact]
+    public void FluxVaeDecoder_RejectsNonF32SafetensorsDtype()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"glacier_vae_f16_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            byte[] headerJson = System.Text.Encoding.UTF8.GetBytes(
+                """{"decoder.conv_in.weight":{"dtype":"F16","shape":[1],"data_offsets":[0,2]}}""");
+            using (var fs = File.Create(path))
+            using (var bw = new BinaryWriter(fs))
+            {
+                bw.Write((ulong)headerJson.Length);
+                bw.Write(headerJson);
+                bw.Write((ushort)0);
+            }
+
+            using var vae = FluxVaeDecoder.Open(path, enableGpu: false);
+            byte[] outRgb = new byte[8 * 8 * 3];
+            Assert.Throws<NotSupportedException>(() => vae.Decode(new float[16], 1, 1, outRgb));
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
         }
     }
 }

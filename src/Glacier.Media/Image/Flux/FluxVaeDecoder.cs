@@ -80,7 +80,14 @@ public unsafe sealed partial class FluxVaeDecoder : IDisposable
         return new FluxVaeDecoder(sf, enableGpu);
     }
 
-    private float* GetWeight(string name) => (float*)_weights.GetTensorPointer(name);
+    private float* GetWeight(string name)
+    {
+        if (!_weights.Tensors.TryGetValue(name, out var info))
+            throw new KeyNotFoundException($"Tensor '{name}' not found in Safetensors file.");
+        if (!string.Equals(info.Dtype, "F32", StringComparison.Ordinal))
+            throw new NotSupportedException($"FluxVaeDecoder requires F32 Safetensors weights, but tensor '{name}' has dtype '{info.Dtype}'.");
+        return (float*)_weights.GetTensorPointer(name);
+    }
     private bool HasTensor(string name) => _weights.ContainsTensor(name);
 
     private IntPtr GetGpuWeight(string name, int floatCount)

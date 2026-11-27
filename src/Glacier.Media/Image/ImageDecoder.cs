@@ -40,6 +40,10 @@ public static class ImageDecoder
 
         int width = (pngBytes[16] << 24) | (pngBytes[17] << 16) | (pngBytes[18] << 8) | pngBytes[19];
         int height = (pngBytes[20] << 24) | (pngBytes[21] << 16) | (pngBytes[22] << 8) | pngBytes[23];
+        if (width <= 0 || height <= 0 || (long)width * height > 64_000_000L)
+        {
+            throw new InvalidDataException($"Invalid PNG dimensions: {width}x{height}.");
+        }
         byte bitDepth = pngBytes[24];
         byte colorType = pngBytes[25]; // 2 = RGB (3 bpp), 6 = RGBA (4 bpp), 0 = Grayscale (1 bpp)
 
@@ -59,9 +63,14 @@ public static class ImageDecoder
         // Concatenate all IDAT compressed chunks
         using var compressedMs = new MemoryStream();
         int offset = 8;
-        while (offset + 8 <= pngBytes.Length)
+        while (offset + 12 <= pngBytes.Length)
         {
-            int chunkLen = (pngBytes[offset] << 24) | (pngBytes[offset + 1] << 16) | (pngBytes[offset + 2] << 8) | pngBytes[offset + 3];
+            uint chunkLenU = (uint)((pngBytes[offset] << 24) | (pngBytes[offset + 1] << 16) | (pngBytes[offset + 2] << 8) | pngBytes[offset + 3]);
+            if (chunkLenU > (uint)(pngBytes.Length - offset - 12))
+            {
+                throw new InvalidDataException($"Truncated or out-of-bounds PNG chunk length: {chunkLenU}.");
+            }
+            int chunkLen = (int)chunkLenU;
             string chunkType = System.Text.Encoding.ASCII.GetString(pngBytes.Slice(offset + 4, 4));
             offset += 8;
 
@@ -80,8 +89,8 @@ public static class ImageDecoder
         compressedMs.Position = 0;
 
         // Decompress raw scanlines
-        int rowBytes = width * bytesPerPixel;
-        byte[] decompressed = new byte[height * (1 + rowBytes)];
+        int rowBytes = checked(width * bytesPerPixel);
+        byte[] decompressed = new byte[checked(height * (1 + rowBytes))];
         using (var zlib = new ZLibStream(compressedMs, CompressionMode.Decompress))
         {
             int read = 0;
@@ -90,6 +99,10 @@ public static class ImageDecoder
                 int n = zlib.Read(decompressed, read, decompressed.Length - read);
                 if (n == 0) break;
                 read += n;
+            }
+            if (read < decompressed.Length)
+            {
+                throw new InvalidDataException($"Truncated PNG IDAT stream: expected {decompressed.Length} scanline bytes, got {read}.");
             }
         }
 
@@ -174,6 +187,10 @@ public static class ImageDecoder
 
         int width = (pngBytes[16] << 24) | (pngBytes[17] << 16) | (pngBytes[18] << 8) | pngBytes[19];
         int height = (pngBytes[20] << 24) | (pngBytes[21] << 16) | (pngBytes[22] << 8) | pngBytes[23];
+        if (width <= 0 || height <= 0 || (long)width * height > 64_000_000L)
+        {
+            throw new InvalidDataException($"Invalid PNG dimensions: {width}x{height}.");
+        }
         byte bitDepth = pngBytes[24];
         byte colorType = pngBytes[25];
 
@@ -187,9 +204,14 @@ public static class ImageDecoder
         // Collect all IDAT chunk payloads
         using var compressedMs = new MemoryStream();
         int offset = 8;
-        while (offset + 8 <= pngBytes.Length)
+        while (offset + 12 <= pngBytes.Length)
         {
-            int chunkLen = (pngBytes[offset] << 24) | (pngBytes[offset + 1] << 16) | (pngBytes[offset + 2] << 8) | pngBytes[offset + 3];
+            uint chunkLenU = (uint)((pngBytes[offset] << 24) | (pngBytes[offset + 1] << 16) | (pngBytes[offset + 2] << 8) | pngBytes[offset + 3]);
+            if (chunkLenU > (uint)(pngBytes.Length - offset - 12))
+            {
+                throw new InvalidDataException($"Truncated or out-of-bounds PNG chunk length: {chunkLenU}.");
+            }
+            int chunkLen = (int)chunkLenU;
             string chunkType = System.Text.Encoding.ASCII.GetString(pngBytes.Slice(offset + 4, 4));
 
             if (chunkType == "IDAT")
@@ -207,8 +229,8 @@ public static class ImageDecoder
         compressedMs.Position = 0;
 
         // Decompress raw scanlines
-        int rowBytes = width * bytesPerPixel;
-        byte[] decompressed = new byte[height * (1 + rowBytes)];
+        int rowBytes = checked(width * bytesPerPixel);
+        byte[] decompressed = new byte[checked(height * (1 + rowBytes))];
         using (var zlib = new ZLibStream(compressedMs, CompressionMode.Decompress))
         {
             int read = 0;
@@ -217,6 +239,10 @@ public static class ImageDecoder
                 int n = zlib.Read(decompressed, read, decompressed.Length - read);
                 if (n == 0) break;
                 read += n;
+            }
+            if (read < decompressed.Length)
+            {
+                throw new InvalidDataException($"Truncated PNG IDAT stream: expected {decompressed.Length} scanline bytes, got {read}.");
             }
         }
 
@@ -294,7 +320,16 @@ public static class ImageDecoder
 
         int pixelOffset = BitConverter.ToInt32(bmpBytes.Slice(10, 4));
         int width = BitConverter.ToInt32(bmpBytes.Slice(18, 4));
-        int height = Math.Abs(BitConverter.ToInt32(bmpBytes.Slice(22, 4)));
+        int rawHeight = BitConverter.ToInt32(bmpBytes.Slice(22, 4));
+        if (width <= 0 || rawHeight == 0 || rawHeight == int.MinValue)
+        {
+            throw new InvalidDataException($"Invalid BMP dimensions: {width}x{rawHeight}.");
+        }
+        int height = Math.Abs(rawHeight);
+        if ((long)width * height > 64_000_000L)
+        {
+            throw new InvalidDataException($"BMP image exceeds maximum pixel count: {width}x{height}.");
+        }
         short bpp = BitConverter.ToInt16(bmpBytes.Slice(28, 2));
 
         if (bpp != 24 && bpp != 32)
@@ -304,12 +339,17 @@ public static class ImageDecoder
 
         int bytesPerPixel = bpp / 8;
         int rowStride = (width * bytesPerPixel + 3) & ~3; // 4-byte aligned scanlines
-        byte[] rgbPixels = new byte[width * height * 3];
+        if (pixelOffset < 54 || (long)pixelOffset + (long)height * rowStride > bmpBytes.Length)
+        {
+            throw new InvalidDataException("BMP pixel buffer extends beyond input bounds.");
+        }
+
+        byte[] rgbPixels = new byte[checked(width * height * 3)];
 
         for (int y = 0; y < height; y++)
         {
-            // Windows BMP is stored bottom-up
-            int bmpY = height - 1 - y;
+            // Positive BMP height is bottom-up; negative height is top-down
+            int bmpY = rawHeight > 0 ? height - 1 - y : y;
             int srcRow = pixelOffset + bmpY * rowStride;
             int dstRow = y * width * 3;
 
