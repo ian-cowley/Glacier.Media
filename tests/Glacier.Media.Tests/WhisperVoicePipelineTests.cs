@@ -45,6 +45,7 @@ public sealed class WhisperVoicePipelineEnvTests
     }
 }
 
+[Collection("NpuEnv")]
 public sealed class WhisperVoicePipelineTests
 {
     [Fact]

@@ -14,6 +14,7 @@ using Glacier.Inference.Hardware;
 using Glacier.Media.Audio;
 using Xunit;
 
+[Collection("NpuEnv")]
 public sealed class OpenAiWhisperClientTests
 {
     [Fact]
