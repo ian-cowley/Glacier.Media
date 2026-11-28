@@ -48,16 +48,8 @@ public sealed class KittenDecoder
         _generator = new Generator(file, config);
     }
 
-    private static unsafe float[] LoadArray(SafetensorsFile file, string tensorName)
-    {
-        var info = file.Tensors[tensorName];
-        float[] arr = new float[info.ElementCount];
-        fixed (float* pDst = arr)
-        {
-            Buffer.MemoryCopy(file.GetTensorPointer(tensorName), pDst, (long)info.ByteSize, (long)info.ByteSize);
-        }
-        return arr;
-    }
+    private static float[] LoadArray(SafetensorsFile file, string tensorName)
+        => KittenSafetensorsLoader.LoadFloat32Array(file, tensorName);
 
     /// <summary>
     /// Executes Decoder and Generator pipeline.

@@ -1,6 +1,7 @@
 namespace Glacier.Media.Image.Flux;
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -106,6 +107,11 @@ public sealed unsafe class FluxT5Encoder : IDisposable
     /// </summary>
     public (int[] Tokens, int ValidCount) Tokenize(string prompt, int maxTokens = 64)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(prompt);
+        if (maxTokens <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxTokens), "maxTokens must be positive.");
+
         string cleaned = prompt.Trim();
         if (string.IsNullOrWhiteSpace(cleaned))
         {
@@ -114,85 +120,87 @@ public sealed unsafe class FluxT5Encoder : IDisposable
             return (res, 1);
         }
 
-        var tokens = new List<int>(maxTokens);
-
-        // Preprocess: trim and prepend SentencePiece space prefix (\u2581)
-        if (!cleaned.StartsWith(" ") && !cleaned.StartsWith("\u2581"))
+        // Preprocess: prepend SentencePiece space prefix (\u2581) and replace spaces
+        if (!cleaned.StartsWith(" ", StringComparison.Ordinal) && !cleaned.StartsWith("\u2581", StringComparison.Ordinal))
         {
             cleaned = "\u2581" + cleaned;
         }
-        cleaned = cleaned.Replace(" ", "\u2581");
+        cleaned = cleaned.Replace(' ', '\u2581');
 
-        // SentencePiece Unigram tokenization via Viterbi dynamic programming
+        // SentencePiece Unigram tokenization via Viterbi dynamic programming (zero-Substring span lookup + pooled DP buffers)
         int n = cleaned.Length;
-        var bestScore = new float[n + 1];
-        var bestToken = new int[n + 1];
-        var bestPrev = new int[n + 1];
+        var floatPool = ArrayPool<float>.Shared;
+        var intPool = ArrayPool<int>.Shared;
 
-        for (int i = 0; i <= n; i++)
+        float[] bestScore = floatPool.Rent(n + 1);
+        int[] bestToken = intPool.Rent(n + 1);
+        int[] bestPrev = intPool.Rent(n + 1);
+        int[] backtrack = intPool.Rent(n);
+
+        try
         {
-            bestScore[i] = float.NegativeInfinity;
-            bestToken[i] = -1;
-            bestPrev[i] = -1;
-        }
-        bestScore[0] = 0f;
+            Array.Fill(bestScore, float.NegativeInfinity, 0, n + 1);
+            Array.Fill(bestToken, -1, 0, n + 1);
+            Array.Fill(bestPrev, -1, 0, n + 1);
+            bestScore[0] = 0f;
 
-        for (int i = 0; i < n; i++)
-        {
-            if (float.IsNegativeInfinity(bestScore[i])) continue;
+            var pieceLookup = _pieceToId.GetAlternateLookup<ReadOnlySpan<char>>();
+            ReadOnlySpan<char> cleanedSpan = cleaned.AsSpan();
 
-            int maxSubLen = Math.Min(32, n - i);
-            for (int len = 1; len <= maxSubLen; len++)
+            for (int i = 0; i < n; i++)
             {
-                string sub = cleaned.Substring(i, len);
-                if (_pieceToId.TryGetValue(sub, out int tid))
+                if (float.IsNegativeInfinity(bestScore[i])) continue;
+
+                int maxSubLen = Math.Min(32, n - i);
+                for (int len = 1; len <= maxSubLen; len++)
                 {
-                    float sc = bestScore[i] + _pieceScores[tid];
-                    if (sc > bestScore[i + len])
+                    if (pieceLookup.TryGetValue(cleanedSpan.Slice(i, len), out int tid))
                     {
-                        bestScore[i + len] = sc;
-                        bestToken[i + len] = tid;
-                        bestPrev[i + len] = i;
+                        float sc = bestScore[i] + _pieceScores[tid];
+                        if (sc > bestScore[i + len])
+                        {
+                            bestScore[i + len] = sc;
+                            bestToken[i + len] = tid;
+                            bestPrev[i + len] = i;
+                        }
                     }
+                }
+
+                // Fallback for single unknown char if no path found
+                if (bestToken[i + 1] == -1)
+                {
+                    bestScore[i + 1] = bestScore[i] - 100.0f;
+                    bestToken[i + 1] = 2; // <unk>
+                    bestPrev[i + 1] = i;
                 }
             }
 
-            // Fallback for single unknown char if no path found
-            if (bestToken[i + 1] == -1)
+            // Backtrack into pooled buffer
+            int count = 0;
+            int curr = n;
+            while (curr > 0)
             {
-                bestScore[i + 1] = bestScore[i] - 100.0f;
-                bestToken[i + 1] = 2; // <unk>
-                bestPrev[i + 1] = i;
+                backtrack[count++] = bestToken[curr];
+                curr = bestPrev[curr];
             }
-        }
 
-        // Backtrack
-        var revTokens = new List<int>();
-        int curr = n;
-        while (curr > 0)
+            // Write forward up to maxTokens - 1, then append EOS (1); remaining slots are already 0 (PAD)
+            var result = new int[maxTokens];
+            int outIdx = 0;
+            for (int i = count - 1; i >= 0 && outIdx < maxTokens - 1; i--)
+            {
+                result[outIdx++] = backtrack[i];
+            }
+            result[outIdx++] = 1; // EOS
+            return (result, outIdx);
+        }
+        finally
         {
-            revTokens.Add(bestToken[curr]);
-            curr = bestPrev[curr];
+            floatPool.Return(bestScore);
+            intPool.Return(bestToken);
+            intPool.Return(bestPrev);
+            intPool.Return(backtrack);
         }
-        revTokens.Reverse();
-
-        for (int i = 0; i < revTokens.Count && tokens.Count < maxTokens - 1; i++)
-        {
-            tokens.Add(revTokens[i]);
-        }
-
-        // Add EOS token (1)
-        tokens.Add(1);
-        int validCount = Math.Min(tokens.Count, maxTokens);
-
-        // Pad to maxTokens with PAD token (0)
-        var result = new int[maxTokens];
-        for (int i = 0; i < maxTokens; i++)
-        {
-            result[i] = i < tokens.Count ? tokens[i] : 0;
-        }
-
-        return (result, validCount);
     }
 
     /// <summary>
@@ -201,11 +209,26 @@ public sealed unsafe class FluxT5Encoder : IDisposable
     /// </summary>
     public (float[] embeds, int validCount) EncodeWithCount(string prompt, int maxSeqLen = 512)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(prompt);
+
         var (tokens, validCount) = Tokenize(prompt, maxSeqLen);
         if (validCount <= 0) validCount = 1;
 
         int computeLen = Math.Max(validCount, 16);
-        float[] full = Encode(prompt, seqLen: computeLen);
+        int[] encodeTokens = tokens;
+        if (tokens.Length < computeLen)
+        {
+            encodeTokens = new int[computeLen];
+            Array.Copy(tokens, encodeTokens, tokens.Length);
+        }
+
+        float[] full = EncodeCore(encodeTokens, validCount, computeLen);
+        if (validCount == computeLen)
+        {
+            return (full, validCount);
+        }
+
         var validOnly = new float[validCount * HiddenDim];
         Array.Copy(full, validOnly, validCount * HiddenDim);
         return (validOnly, validCount);
@@ -217,7 +240,16 @@ public sealed unsafe class FluxT5Encoder : IDisposable
     /// </summary>
     public float[] Encode(string prompt, int seqLen = 64)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(prompt);
+
         var (tokens, validCount) = Tokenize(prompt, seqLen);
+        return EncodeCore(tokens, validCount, seqLen);
+    }
+
+    private float[] EncodeCore(int[] tokens, int validCount, int seqLen)
+    {
+        validCount = Math.Clamp(validCount, 1, seqLen);
 
         // Scratch memory
         float* hidden = (float*)NativeMemory.AlignedAlloc((nuint)(seqLen * HiddenDim * sizeof(float)), 64);

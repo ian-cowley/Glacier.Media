@@ -3,6 +3,7 @@ namespace Glacier.Media.Audio.Kitten;
 using System;
 using System.IO;
 using System.Text.Json;
+using Glacier.Inference.Diagnostics;
 
 /// <summary>
 /// Configuration parameters for the KittenTTS neural text-to-speech architecture.
@@ -72,8 +73,9 @@ public sealed class KittenConfig
 
             return cfg;
         }
-        catch
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or FormatException or InvalidOperationException)
         {
+            GlacierDiagnostics.LogWarning($"Failed to parse KittenTTS config '{jsonPath}', falling back to default nano config: {ex.Message}", ex);
             return CreateNano();
         }
     }

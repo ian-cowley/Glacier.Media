@@ -82,16 +82,8 @@ public sealed class KittenTextEncoder
         _adain3FcBias = LoadArray(file, "predictor.text_encoder.lstms.3.fc.bias");
     }
 
-    private static unsafe float[] LoadArray(SafetensorsFile file, string tensorName)
-    {
-        var info = file.Tensors[tensorName];
-        float[] arr = new float[info.ElementCount];
-        fixed (float* pDst = arr)
-        {
-            Buffer.MemoryCopy(file.GetTensorPointer(tensorName), pDst, (long)info.ByteSize, (long)info.ByteSize);
-        }
-        return arr;
-    }
+    private static float[] LoadArray(SafetensorsFile file, string tensorName)
+        => KittenSafetensorsLoader.LoadFloat32Array(file, tensorName);
 
     /// <summary>
     /// Executes Text Encoder forward pass.

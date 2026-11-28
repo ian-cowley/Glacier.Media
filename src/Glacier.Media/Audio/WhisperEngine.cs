@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 using Glacier.Inference.Hardware;
 
 /// <summary>
-/// Configuration options for <see cref="WhisperEngine"/> local NPU/OpenAI STT routing and fallback behavior.
+/// Configuration options for <see cref="WhisperEngine"/> HTTP <c>/v1/audio/transcriptions</c> STT client routing.
 /// </summary>
 public sealed class WhisperEngineOptions
 {
@@ -27,10 +27,10 @@ public sealed class WhisperEngineOptions
 }
 
 /// <summary>
-/// Experimental Speech-to-Text (STT) engine for the Whisper architecture.
-/// Routes transcription to a configured or auto-discovered local OpenAI-compatible NPU sidecar
-/// (<c>POST /v1/audio/transcriptions</c>) when available; falls back cleanly to
-/// <see cref="NotSupportedException"/> when no sidecar is reachable and no local GGUF weights are loaded.
+/// Experimental Speech-to-Text (STT) HTTP client/proxy targeting OpenAI-compatible transcription endpoints
+/// (<c>POST /v1/audio/transcriptions</c>) or auto-discovered local NPU sidecars.
+/// Local in-process GGUF Whisper decoding is not implemented (<see cref="SupportsLocalDecoding"/> is <see langword="false"/>);
+/// throws <see cref="NotSupportedException"/> when no remote/sidecar endpoint is reachable.
 /// </summary>
 [Experimental("GLACIER_EXP001")]
 public sealed class WhisperEngine : IDisposable
@@ -51,9 +51,8 @@ public sealed class WhisperEngine : IDisposable
     public const int TokenEndOfTranscript = 50257;
 
     private const string UnsupportedFallbackMessage =
-        "WhisperEngine requires GGUF Whisper model weights or a reachable local OpenAI-compatible STT/NPU sidecar. Weightless stub transcription has been disabled.";
+        "WhisperEngine is an HTTP /v1/audio/transcriptions client proxy with no local GGUF/neural decoding; configure an explicit endpoint or start a reachable local OpenAI-compatible STT/NPU sidecar.";
 
-    private readonly MelSpectrogram _melDsp;
     private readonly int _encoderLayers;
     private readonly int _decoderLayers;
     private readonly int _defaultSampleRate;
@@ -77,6 +76,9 @@ public sealed class WhisperEngine : IDisposable
     public int EncoderLayers => _encoderLayers;
     public int DecoderLayers => _decoderLayers;
     public bool HasRemoteClient => Volatile.Read(ref _client) != null;
+    public bool SupportsLocalDecoding => false;
+    public bool RequiresRemoteEndpoint => true;
+    public string ActiveBackend => HasRemoteClient ? "RemoteOpenAiHttp" : "Unconfigured";
 
     public WhisperEngine(int encoderLayers = 4, int decoderLayers = 4)
         : this(new WhisperEngineOptions
@@ -98,7 +100,6 @@ public sealed class WhisperEngine : IDisposable
         _encoderLayers = encoderLayers;
         _decoderLayers = decoderLayers;
         _defaultSampleRate = DefaultSampleRate;
-        _melDsp = new MelSpectrogram(DefaultSampleRate, MelBins);
         _client = client;
         _ownsClient = ownsClient;
         _autoDiscoverNpu = false;
@@ -117,7 +118,6 @@ public sealed class WhisperEngine : IDisposable
         _encoderLayers = encoderLayers;
         _decoderLayers = decoderLayers;
         _defaultSampleRate = DefaultSampleRate;
-        _melDsp = new MelSpectrogram(DefaultSampleRate, MelBins);
 
         if (OpenAiWhisperClient.IsAutoNpuEndpoint(endpointUrl))
         {
@@ -143,7 +143,6 @@ public sealed class WhisperEngine : IDisposable
         _decoderLayers = options.DecoderLayers;
         _defaultSampleRate = options.SampleRate;
         _defaultLanguage = options.DefaultLanguage;
-        _melDsp = new MelSpectrogram(DefaultSampleRate, MelBins);
 
         bool isAutoNpu = OpenAiWhisperClient.IsAutoNpuEndpoint(options.Endpoint);
         if (!string.IsNullOrWhiteSpace(options.Endpoint) && !isAutoNpu)
@@ -183,7 +182,6 @@ public sealed class WhisperEngine : IDisposable
         _encoderLayers = encoderLayers;
         _decoderLayers = decoderLayers;
         _defaultSampleRate = DefaultSampleRate;
-        _melDsp = new MelSpectrogram(DefaultSampleRate, MelBins);
         _probeHttpClient = probeHttpClient;
         _discoveryCandidates = discoveryCandidates;
         _explicitEndpoint = endpoint;
@@ -195,8 +193,8 @@ public sealed class WhisperEngine : IDisposable
     }
 
     /// <summary>
-    /// Transcribes 16kHz mono audio samples into text via a configured or auto-discovered local STT sidecar.
-    /// Throws <see cref="NotSupportedException"/> if no sidecar is reachable and no local GGUF weights are loaded.
+    /// Transcribes 16kHz mono audio samples into text via a configured or auto-discovered HTTP STT endpoint.
+    /// Throws <see cref="NotSupportedException"/> if no remote endpoint or sidecar is reachable.
     /// </summary>
     public string Transcribe(ReadOnlySpan<float> audio)
     {
@@ -204,8 +202,8 @@ public sealed class WhisperEngine : IDisposable
     }
 
     /// <summary>
-    /// Transcribes mono audio samples at the specified sample rate into text via a configured or auto-discovered local STT sidecar.
-    /// Throws <see cref="NotSupportedException"/> if no sidecar is reachable and no local GGUF weights are loaded.
+    /// Transcribes mono audio samples at the specified sample rate into text via a configured or auto-discovered HTTP STT endpoint.
+    /// Throws <see cref="NotSupportedException"/> if no remote endpoint or sidecar is reachable.
     /// </summary>
     public string Transcribe(ReadOnlySpan<float> audio, int sampleRate, string? language = null)
     {
@@ -361,6 +359,5 @@ public sealed class WhisperEngine : IDisposable
         }
 
         _disposeCts.Dispose();
-        _melDsp.Dispose();
     }
 }

@@ -3,8 +3,6 @@ namespace Glacier.Media.Tests;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -213,20 +211,12 @@ public class MediaCornerCaseChallengerTests
             Assert.True(expectedPixels.AsSpan().SequenceEqual(actualPixels),
                 $"Pixel data in BMP for {width}x{height} does not match oracle BGR scanlines!");
 
-            // 4. Verify GDI+ Bitmap loads and decodes the BMP without error
-            if (OperatingSystem.IsWindows())
-            {
-                using var bmp = new Bitmap(tmpFile);
-                Assert.Equal(width, bmp.Width);
-                Assert.Equal(height, bmp.Height);
-                Assert.Equal(PixelFormat.Format24bppRgb, bmp.PixelFormat);
-
-                // Spot check color at (0, 0)
-                Color c00 = bmp.GetPixel(0, 0);
-                Assert.Equal(srcRgb[0], c00.R);
-                Assert.Equal(srcRgb[1], c00.G);
-                Assert.Equal(srcRgb[2], c00.B);
-            }
+            // 4. Verify pure-C# ImageDecoder.DecodeBmp roundtrips the BMP bit-for-bit cross-platform
+            var (decodedRgb, decW, decH) = ImageDecoder.DecodeBmp(fileBytes);
+            Assert.Equal(width, decW);
+            Assert.Equal(height, decH);
+            Assert.True(srcRgb.AsSpan().SequenceEqual(decodedRgb),
+                $"Decoded BMP RGB pixels for {width}x{height} do not match source RGB!");
         }
         finally
         {
@@ -348,8 +338,6 @@ public class MediaCornerCaseChallengerTests
     [InlineData(128, 128, 2)]
     public void GifWriter_CanBeDecodedByStandardGdiPlus(int width, int height, int numFrames)
     {
-        if (!OperatingSystem.IsWindows()) return;
-
         var frames = new List<byte[]>();
         for (int f = 0; f < numFrames; f++)
         {
@@ -362,26 +350,17 @@ public class MediaCornerCaseChallengerTests
             GifWriter.SaveGif(tmpFile, frames, width, height, fps: 10);
             Assert.True(File.Exists(tmpFile));
 
-            if (OperatingSystem.IsWindows())
+            var decoded = GifOracleDecoder.Decode(File.ReadAllBytes(tmpFile));
+            Assert.Equal(width, decoded.ScreenWidth);
+            Assert.Equal(height, decoded.ScreenHeight);
+            Assert.Equal(numFrames, decoded.Frames.Count);
+            Assert.NotNull(decoded.GlobalColorTable);
+            Assert.All(decoded.Frames, frame =>
             {
-                // Standard Windows GDI+ GIF decoder test
-                using var img = Image.FromFile(tmpFile);
-                Assert.Equal(width, img.Width);
-                Assert.Equal(height, img.Height);
-
-                var dimension = new FrameDimension(img.FrameDimensionsList[0]);
-                int frameCount = img.GetFrameCount(dimension);
-                Assert.Equal(numFrames, frameCount);
-
-                // Select and verify each frame in GDI+
-                for (int f = 0; f < numFrames; f++)
-                {
-                    img.SelectActiveFrame(dimension, f);
-                    using var bmp = new Bitmap(img);
-                    Assert.Equal(width, bmp.Width);
-                    Assert.Equal(height, bmp.Height);
-                }
-            }
+                Assert.Equal(width, frame.Width);
+                Assert.Equal(height, frame.Height);
+                Assert.Equal(width * height, frame.Indices.Length);
+            });
         }
         finally
         {

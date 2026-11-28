@@ -20,7 +20,8 @@ public sealed record VideoMetadata(
 /// <summary>
 /// Experimental procedural Video ingestion pipeline supporting uniform keyframe sampling, motion profiling,
 /// 3D-RoPE spatial-temporal embeddings, and synthetic visual feature extraction.
-/// Heuristic VLM text generation (<see cref="Query(IReadOnlyList{byte[]}, int, int, string, int, int)"/>) is disabled.
+/// VLM natural-language query (<see cref="Query(IReadOnlyList{byte[]}, int, int, string, int, int)"/>) requires
+/// an explicit external VLM query delegate; otherwise <see cref="SupportsVlmQuery"/> is <see langword="false"/>.
 /// </summary>
 [Experimental("GLACIER_EXP001")]
 public sealed class VideoPipeline : IDisposable
@@ -28,25 +29,31 @@ public sealed class VideoPipeline : IDisposable
 #pragma warning disable GLACIER_EXP001
     private readonly VisionPipeline _visionPipeline;
     private readonly VideoRoPE _videoRope;
+    private readonly Func<VideoMetadata, float[], string, string>? _vlmQueryHandler;
     private bool _disposed;
 
     public VisionPipeline Vision => _visionPipeline;
     public VideoRoPE VideoRoPE => _videoRope;
+    public bool SupportsVlmQuery => _vlmQueryHandler != null;
+    public bool IsNeuralVlm => false;
+    public string ActiveBackend => _vlmQueryHandler != null ? "ExternalVlmDelegate" : "ProceduralMetadataAndEmbeddings";
 
     public VideoPipeline(
         int numLayers = 4,
         int visionDim = 768,
         int llmDim = 3584,
-        int patchSize = 14)
+        int patchSize = 14,
+        Func<VideoMetadata, float[], string, string>? vlmQueryHandler = null)
     {
         _visionPipeline = new VisionPipeline(numLayers, visionDim, llmDim, patchSize);
         _videoRope = new VideoRoPE(_visionPipeline.Vit.HeadDim, 10000.0f);
+        _vlmQueryHandler = vlmQueryHandler;
     }
 
     /// <summary>
-    /// Processes a sequence of video frames and extracts synthetic temporal tokens and motion statistics.
+    /// Computes deterministic keyframe and motion dynamics metadata across a sequence of video frames.
     /// </summary>
-    public (int TotalTokens, float[] TemporalEmbeddings, VideoMetadata Metadata) ProcessVideo(
+    public VideoMetadata AnalyzeFrames(
         IReadOnlyList<byte[]> frames,
         int width,
         int height,
@@ -54,17 +61,18 @@ public sealed class VideoPipeline : IDisposable
         int channels = 3)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        _ = width;
+        _ = height;
+        _ = channels;
 
         if (frames == null || frames.Count == 0)
         {
             throw new ArgumentException("Video must contain at least 1 frame.", nameof(frames));
         }
 
-        // 1. Keyframe sampling
         int[] keyframeIndices = VideoFrameSampler.SampleUniformIndices(frames.Count, targetKeyframes);
         int sampleCount = keyframeIndices.Length;
 
-        // 2. Compute motion dynamics across sampled frames
         float totalMotion = 0.0f;
         float maxMotion = 0.0f;
         int peakFrame = 0;
@@ -89,7 +97,43 @@ public sealed class VideoPipeline : IDisposable
             _ => "Static / stationary shot with minimal temporal variation"
         };
 
-        // 3. Process keyframe visual embeddings
+        string summary = $"Sequence of {frames.Count} frames sampled down to {sampleCount} keyframes. Mean motion energy: {avgMotion * 100:F1}%. Peak action at frame #{peakFrame}.";
+
+        return new VideoMetadata(
+            TotalFrames: frames.Count,
+            KeyframeSampleCount: sampleCount,
+            AverageMotionEnergy: avgMotion,
+            MaxMotionEnergy: maxMotion,
+            PeakMotionFrame: peakFrame,
+            MotionPattern: motionPattern,
+            TemporalSummary: summary);
+    }
+
+    /// <summary>
+    /// Formats a deterministic, factual inspection summary from computed <see cref="VideoMetadata"/>.
+    /// </summary>
+    public static string SummarizeMetadata(VideoMetadata metadata)
+    {
+        ArgumentNullException.ThrowIfNull(metadata);
+        return $"{metadata.TemporalSummary} Pattern: {metadata.MotionPattern}. Max motion energy: {metadata.MaxMotionEnergy * 100:F1}% (frame #{metadata.PeakMotionFrame}).";
+    }
+
+    /// <summary>
+    /// Processes a sequence of video frames and extracts synthetic temporal tokens and motion statistics.
+    /// </summary>
+    public (int TotalTokens, float[] TemporalEmbeddings, VideoMetadata Metadata) ProcessVideo(
+        IReadOnlyList<byte[]> frames,
+        int width,
+        int height,
+        int targetKeyframes = 4,
+        int channels = 3)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var metadata = AnalyzeFrames(frames, width, height, targetKeyframes, channels);
+        int[] keyframeIndices = VideoFrameSampler.SampleUniformIndices(frames.Count, targetKeyframes);
+        int sampleCount = keyframeIndices.Length;
+
         int tokensPerFrame = 256; // Standard 2x2 merged tokens for 448x448
         int totalVisualTokens = sampleCount * tokensPerFrame;
         var allEmbeddings = new float[totalVisualTokens * _visionPipeline.Projector.LlmDim];
@@ -102,24 +146,13 @@ public sealed class VideoPipeline : IDisposable
             Array.Copy(emb, 0, allEmbeddings, k * tokensPerFrame * _visionPipeline.Projector.LlmDim, copyCount);
         }
 
-        string summary = $"Sequence of {frames.Count} frames sampled down to {sampleCount} keyframes. Mean motion energy: {avgMotion * 100:F1}%. Peak action at frame #{peakFrame}.";
-
-        var metadata = new VideoMetadata(
-            TotalFrames: frames.Count,
-            KeyframeSampleCount: sampleCount,
-            AverageMotionEnergy: avgMotion,
-            MaxMotionEnergy: maxMotion,
-            PeakMotionFrame: peakFrame,
-            MotionPattern: motionPattern,
-            TemporalSummary: summary);
-
         return (totalVisualTokens, allEmbeddings, metadata);
     }
 #pragma warning restore GLACIER_EXP001
 
     /// <summary>
-    /// Disabled heuristic Video-LLM query stub. Throws <see cref="NotSupportedException"/> because multimodal
-    /// video-LLM weights are not loaded by this procedural pipeline.
+    /// Queries a video sequence via the configured external VLM query delegate.
+    /// Throws <see cref="NotSupportedException"/> when <see cref="SupportsVlmQuery"/> is <see langword="false"/>.
     /// </summary>
     public string Query(
         IReadOnlyList<byte[]> frames,
@@ -130,28 +163,34 @@ public sealed class VideoPipeline : IDisposable
         int channels = 3)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _ = frames;
-        _ = width;
-        _ = height;
-        _ = prompt;
-        _ = targetKeyframes;
-        _ = channels;
-        throw new NotSupportedException(
-            "VideoPipeline.Query VLM text generation requires multimodal video-LLM weights which are not loaded by this procedural pipeline. For pretrained multimodal embeddings, use EmbeddingGemma2Model with AttachMultimodalProjector.");
+        if (_vlmQueryHandler == null)
+        {
+            throw new NotSupportedException(
+                "VideoPipeline.Query VLM text generation requires multimodal video-LLM weights or an external VLM query delegate. Use AnalyzeFrames or SummarizeMetadata for deterministic motion inspection.");
+        }
+
+        ArgumentNullException.ThrowIfNull(prompt);
+        var (_, emb, meta) = ProcessVideo(frames, width, height, targetKeyframes, channels);
+        return _vlmQueryHandler(meta, emb, prompt);
     }
 
     /// <summary>
-    /// Disabled heuristic Video-LLM query stub. Throws <see cref="NotSupportedException"/> because multimodal
-    /// video-LLM weights are not loaded by this procedural pipeline.
+    /// Queries precomputed <see cref="VideoMetadata"/> via the configured external VLM query delegate.
+    /// Throws <see cref="NotSupportedException"/> when <see cref="SupportsVlmQuery"/> is <see langword="false"/>.
     /// </summary>
     public string Query(VideoMetadata meta, string prompt, int totalTokens = 1024)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _ = meta;
-        _ = prompt;
+        if (_vlmQueryHandler == null)
+        {
+            throw new NotSupportedException(
+                "VideoPipeline.Query VLM text generation requires multimodal video-LLM weights or an external VLM query delegate. Use SummarizeMetadata for deterministic motion inspection.");
+        }
+
+        ArgumentNullException.ThrowIfNull(meta);
+        ArgumentNullException.ThrowIfNull(prompt);
         _ = totalTokens;
-        throw new NotSupportedException(
-            "VideoPipeline.Query VLM text generation requires multimodal video-LLM weights which are not loaded by this procedural pipeline. For pretrained multimodal embeddings, use EmbeddingGemma2Model with AttachMultimodalProjector.");
+        return _vlmQueryHandler(meta, Array.Empty<float>(), prompt);
     }
 
 #pragma warning disable GLACIER_EXP001

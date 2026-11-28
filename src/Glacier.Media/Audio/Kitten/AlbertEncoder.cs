@@ -1,6 +1,7 @@
 namespace Glacier.Media.Audio.Kitten;
 
 using System;
+using System.Buffers;
 using Glacier.Inference.Format;
 
 /// <summary>
@@ -83,16 +84,8 @@ public sealed class AlbertEncoder
         _bertEncoderBias = LoadArray(file, "bert_encoder.bias");
     }
 
-    private static unsafe float[] LoadArray(SafetensorsFile file, string tensorName)
-    {
-        var info = file.Tensors[tensorName];
-        float[] arr = new float[info.ElementCount];
-        fixed (float* pDst = arr)
-        {
-            Buffer.MemoryCopy(file.GetTensorPointer(tensorName), pDst, (long)info.ByteSize, (long)info.ByteSize);
-        }
-        return arr;
-    }
+    private static float[] LoadArray(SafetensorsFile file, string tensorName)
+        => KittenSafetensorsLoader.LoadFloat32Array(file, tensorName);
 
     /// <summary>
     /// Forward pass through ALBERT transformer encoder.
@@ -103,116 +96,149 @@ public sealed class AlbertEncoder
         int seqLen = inputIds.Length;
         if (seqLen == 0) return Array.Empty<float>();
 
-        // 1. Embeddings: word + type (0) + position
-        float[] emb = new float[seqLen * EmbedDim];
-        for (int i = 0; i < seqLen; i++)
+        int embLen = checked(seqLen * EmbedDim);
+        int hiddenLen = checked(seqLen * HiddenDim);
+        int ffnLen = checked(seqLen * FfnDim);
+
+        var pool = ArrayPool<float>.Shared;
+        float[] emb = pool.Rent(embLen);
+        float[] hidden = pool.Rent(hiddenLen);
+        float[] q = pool.Rent(hiddenLen);
+        float[] k = pool.Rent(hiddenLen);
+        float[] v = pool.Rent(hiddenLen);
+        float[] ctx = pool.Rent(hiddenLen);
+        float[] denseOut = pool.Rent(hiddenLen);
+        float[] attnNorm = pool.Rent(hiddenLen);
+        float[] ffnMid = pool.Rent(ffnLen);
+        float[] ffnOut = pool.Rent(hiddenLen);
+        float[] scores = pool.Rent(seqLen);
+
+        try
         {
-            int token = Math.Clamp(inputIds[i], 0, 177);
-            int pos = Math.Clamp(i, 0, 511);
+            Span<float> embSpan = emb.AsSpan(0, embLen);
+            Span<float> hiddenSpan = hidden.AsSpan(0, hiddenLen);
+            Span<float> qSpanAll = q.AsSpan(0, hiddenLen);
+            Span<float> kSpanAll = k.AsSpan(0, hiddenLen);
+            Span<float> vSpanAll = v.AsSpan(0, hiddenLen);
+            Span<float> ctxSpan = ctx.AsSpan(0, hiddenLen);
+            Span<float> denseOutSpan = denseOut.AsSpan(0, hiddenLen);
+            Span<float> attnNormSpan = attnNorm.AsSpan(0, hiddenLen);
+            Span<float> ffnMidSpan = ffnMid.AsSpan(0, ffnLen);
+            Span<float> ffnOutSpan = ffnOut.AsSpan(0, hiddenLen);
+            Span<float> scoresSpan = scores.AsSpan(0, seqLen);
 
-            int embOffset = i * EmbedDim;
-            int wordOffset = token * EmbedDim;
-            int posOffset = pos * EmbedDim;
-
-            for (int d = 0; d < EmbedDim; d++)
+            // 1. Embeddings: word + type (0) + position
+            for (int i = 0; i < seqLen; i++)
             {
-                emb[embOffset + d] = _wordEmbeddings[wordOffset + d] +
-                                     _tokenTypeEmbeddings[d] +
-                                     _positionEmbeddings[posOffset + d];
-            }
-        }
+                int token = Math.Clamp(inputIds[i], 0, 177);
+                int pos = Math.Clamp(i, 0, 511);
 
-        // LayerNorm over embeddings
-        KittenTensorOps.LayerNorm(emb, _embedNormWeight, _embedNormBias, emb, seqLen, EmbedDim);
+                int embOffset = i * EmbedDim;
+                int wordOffset = token * EmbedDim;
+                int posOffset = pos * EmbedDim;
 
-        // 2. Embedding to Hidden Mapping (128 -> 768)
-        float[] hidden = new float[seqLen * HiddenDim];
-        KittenTensorOps.BatchLinear(emb, _mappingWeight, _mappingBias, hidden, seqLen, EmbedDim, HiddenDim);
-
-        // Scratch buffers for shared transformer layer
-        float[] q = new float[seqLen * HiddenDim];
-        float[] k = new float[seqLen * HiddenDim];
-        float[] v = new float[seqLen * HiddenDim];
-        float[] ctx = new float[seqLen * HiddenDim];
-        float[] denseOut = new float[seqLen * HiddenDim];
-        float[] attnNorm = new float[seqLen * HiddenDim];
-        float[] ffnMid = new float[seqLen * FfnDim];
-        float[] ffnOut = new float[seqLen * HiddenDim];
-        float[] scores = new float[seqLen];
-
-        float scale = 1.0f / MathF.Sqrt(HeadDim); // 1.0 / 8.0 = 0.125f
-
-        // 3. 12 Shared Transformer Layers
-        for (int layer = 0; layer < NumLayers; layer++)
-        {
-            // Project Q, K, V
-            KittenTensorOps.BatchLinear(hidden, _queryWeight, _queryBias, q, seqLen, HiddenDim, HiddenDim);
-            KittenTensorOps.BatchLinear(hidden, _keyWeight, _keyBias, k, seqLen, HiddenDim, HiddenDim);
-            KittenTensorOps.BatchLinear(hidden, _valueWeight, _valueBias, v, seqLen, HiddenDim, HiddenDim);
-
-            // Multi-head self-attention
-            for (int h = 0; h < NumHeads; h++)
-            {
-                int headOffset = h * HeadDim;
-
-                for (int qi = 0; qi < seqLen; qi++)
+                for (int d = 0; d < EmbedDim; d++)
                 {
-                    int qIdx = qi * HiddenDim + headOffset;
-                    var qSpan = new ReadOnlySpan<float>(q, qIdx, HeadDim);
-
-                    for (int ki = 0; ki < seqLen; ki++)
-                    {
-                        int kIdx = ki * HiddenDim + headOffset;
-                        var kSpan = new ReadOnlySpan<float>(k, kIdx, HeadDim);
-                        scores[ki] = KittenTensorOps.Dot(qSpan, kSpan) * scale;
-                    }
-
-                    // Softmax across keys for token qi
-                    KittenTensorOps.Softmax(scores);
-
-                    // Weighted sum of V
-                    int outIdx = qi * HiddenDim + headOffset;
-                    for (int d = 0; d < HeadDim; d++)
-                    {
-                        float sum = 0f;
-                        for (int ki = 0; ki < seqLen; ki++)
-                        {
-                            sum += scores[ki] * v[ki * HiddenDim + headOffset + d];
-                        }
-                        ctx[outIdx + d] = sum;
-                    }
+                    embSpan[embOffset + d] = _wordEmbeddings[wordOffset + d] +
+                                             _tokenTypeEmbeddings[d] +
+                                             _positionEmbeddings[posOffset + d];
                 }
             }
 
-            // Attention dense projection + residual add with hidden
-            KittenTensorOps.BatchLinear(ctx, _denseWeight, _denseBias, denseOut, seqLen, HiddenDim, HiddenDim);
-            for (int i = 0; i < hidden.Length; i++)
+            // LayerNorm over embeddings
+            KittenTensorOps.LayerNorm(embSpan, _embedNormWeight, _embedNormBias, embSpan, seqLen, EmbedDim);
+
+            // 2. Embedding to Hidden Mapping (128 -> 768)
+            KittenTensorOps.BatchLinear(embSpan, _mappingWeight, _mappingBias, hiddenSpan, seqLen, EmbedDim, HiddenDim);
+
+            float scale = 1.0f / MathF.Sqrt(HeadDim); // 1.0 / 8.0 = 0.125f
+
+            // 3. 12 Shared Transformer Layers
+            for (int layer = 0; layer < NumLayers; layer++)
             {
-                denseOut[i] += hidden[i];
+                // Project Q, K, V
+                KittenTensorOps.BatchLinear(hiddenSpan, _queryWeight, _queryBias, qSpanAll, seqLen, HiddenDim, HiddenDim);
+                KittenTensorOps.BatchLinear(hiddenSpan, _keyWeight, _keyBias, kSpanAll, seqLen, HiddenDim, HiddenDim);
+                KittenTensorOps.BatchLinear(hiddenSpan, _valueWeight, _valueBias, vSpanAll, seqLen, HiddenDim, HiddenDim);
+
+                // Multi-head self-attention
+                for (int h = 0; h < NumHeads; h++)
+                {
+                    int headOffset = h * HeadDim;
+
+                    for (int qi = 0; qi < seqLen; qi++)
+                    {
+                        int qIdx = qi * HiddenDim + headOffset;
+                        var qSlice = qSpanAll.Slice(qIdx, HeadDim);
+
+                        for (int ki = 0; ki < seqLen; ki++)
+                        {
+                            int kIdx = ki * HiddenDim + headOffset;
+                            var kSlice = kSpanAll.Slice(kIdx, HeadDim);
+                            scoresSpan[ki] = KittenTensorOps.Dot(qSlice, kSlice) * scale;
+                        }
+
+                        // Softmax across keys for token qi (strictly sliced to seqLen!)
+                        KittenTensorOps.Softmax(scoresSpan);
+
+                        // Weighted sum of V
+                        int outIdx = qi * HiddenDim + headOffset;
+                        for (int d = 0; d < HeadDim; d++)
+                        {
+                            float sum = 0f;
+                            for (int ki = 0; ki < seqLen; ki++)
+                            {
+                                sum += scoresSpan[ki] * vSpanAll[ki * HiddenDim + headOffset + d];
+                            }
+                            ctxSpan[outIdx + d] = sum;
+                        }
+                    }
+                }
+
+                // Attention dense projection + residual add with hidden
+                KittenTensorOps.BatchLinear(ctxSpan, _denseWeight, _denseBias, denseOutSpan, seqLen, HiddenDim, HiddenDim);
+                for (int i = 0; i < hiddenLen; i++)
+                {
+                    denseOutSpan[i] += hiddenSpan[i];
+                }
+
+                // LayerNorm after attention
+                KittenTensorOps.LayerNorm(denseOutSpan, _attnNormWeight, _attnNormBias, attnNormSpan, seqLen, HiddenDim);
+
+                // FFN: 768 -> 2048 -> GELU -> 768
+                KittenTensorOps.BatchLinear(attnNormSpan, _ffnWeight, _ffnBias, ffnMidSpan, seqLen, HiddenDim, FfnDim);
+                KittenTensorOps.GeluInPlace(ffnMidSpan);
+                KittenTensorOps.BatchLinear(ffnMidSpan, _ffnOutWeight, _ffnOutBias, ffnOutSpan, seqLen, FfnDim, HiddenDim);
+
+                // Residual add with attnNorm
+                for (int i = 0; i < hiddenLen; i++)
+                {
+                    ffnOutSpan[i] += attnNormSpan[i];
+                }
+
+                // LayerNorm after FFN -> becomes hidden for next layer
+                KittenTensorOps.LayerNorm(ffnOutSpan, _fullNormWeight, _fullNormBias, hiddenSpan, seqLen, HiddenDim);
             }
 
-            // LayerNorm after attention
-            KittenTensorOps.LayerNorm(denseOut, _attnNormWeight, _attnNormBias, attnNorm, seqLen, HiddenDim);
+            // 4. Output projection: 768 -> 128
+            float[] output = new float[embLen];
+            KittenTensorOps.BatchLinear(hiddenSpan, _bertEncoderWeight, _bertEncoderBias, output, seqLen, HiddenDim, EmbedDim);
 
-            // FFN: 768 -> 2048 -> GELU -> 768
-            KittenTensorOps.BatchLinear(attnNorm, _ffnWeight, _ffnBias, ffnMid, seqLen, HiddenDim, FfnDim);
-            KittenTensorOps.GeluInPlace(ffnMid);
-            KittenTensorOps.BatchLinear(ffnMid, _ffnOutWeight, _ffnOutBias, ffnOut, seqLen, FfnDim, HiddenDim);
-
-            // Residual add with attnNorm
-            for (int i = 0; i < hidden.Length; i++)
-            {
-                ffnOut[i] += attnNorm[i];
-            }
-
-            // LayerNorm after FFN -> becomes hidden for next layer
-            KittenTensorOps.LayerNorm(ffnOut, _fullNormWeight, _fullNormBias, hidden, seqLen, HiddenDim);
+            return output;
         }
-
-        // 4. Output projection: 768 -> 128
-        float[] output = new float[seqLen * EmbedDim];
-        KittenTensorOps.BatchLinear(hidden, _bertEncoderWeight, _bertEncoderBias, output, seqLen, HiddenDim, EmbedDim);
-
-        return output;
+        finally
+        {
+            pool.Return(scores);
+            pool.Return(ffnOut);
+            pool.Return(ffnMid);
+            pool.Return(attnNorm);
+            pool.Return(denseOut);
+            pool.Return(ctx);
+            pool.Return(v);
+            pool.Return(k);
+            pool.Return(q);
+            pool.Return(hidden);
+            pool.Return(emb);
+        }
     }
 }

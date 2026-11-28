@@ -229,17 +229,14 @@ public class MediaChallengerTests
             GifWriter.SaveGif(tmpFile, [complexFrame], w, h, fps: 8);
             Assert.True(File.Exists(tmpFile));
 
-            if (OperatingSystem.IsWindows())
-            {
-                using var img = System.Drawing.Image.FromFile(tmpFile);
-                Assert.Equal(w, img.Width);
-                Assert.Equal(h, img.Height);
-                using var bmp = new System.Drawing.Bitmap(img);
-                Assert.True(bmp.GetPixel(0, 0).A > 0);
-                Assert.True(bmp.GetPixel(w / 2, h / 2).A > 0);
-            }
-
             byte[] bytes = File.ReadAllBytes(tmpFile);
+            var decodedGif = GifOracleDecoder.Decode(bytes);
+            Assert.Equal(w, decodedGif.ScreenWidth);
+            Assert.Equal(h, decodedGif.ScreenHeight);
+            Assert.Single(decodedGif.Frames);
+            Assert.Equal(w * h, decodedGif.Frames[0].Indices.Length);
+            Assert.NotNull(decodedGif.GlobalColorTable);
+
             int clearCodeCount = CountGifClearCodesInStream(bytes);
 
             // Ensure that dictionary saturation occurred and multiple Clear Codes were processed
@@ -358,22 +355,14 @@ public class MediaChallengerTests
             GifWriter.SaveGif(tmpFile, [frame], w, h, fps: 10);
             Assert.True(File.Exists(tmpFile));
 
-            if (OperatingSystem.IsWindows())
-            {
-                using var img = System.Drawing.Image.FromFile(tmpFile);
-                Assert.Equal(w, img.Width);
-                Assert.Equal(h, img.Height);
-
-                using var bmp = new System.Drawing.Bitmap(img);
-                for (int y = 0; y < h; y++)
-                {
-                    for (int x = 0; x < w; x++)
-                    {
-                        var p = bmp.GetPixel(x, y);
-                        Assert.True(p.A > 0);
-                    }
-                }
-            }
+            var decoded = GifOracleDecoder.Decode(File.ReadAllBytes(tmpFile));
+            Assert.Equal(w, decoded.ScreenWidth);
+            Assert.Equal(h, decoded.ScreenHeight);
+            Assert.Single(decoded.Frames);
+            Assert.Equal(w, decoded.Frames[0].Width);
+            Assert.Equal(h, decoded.Frames[0].Height);
+            Assert.Equal(w * h, decoded.Frames[0].Indices.Length);
+            Assert.NotNull(decoded.GlobalColorTable);
         }
         finally
         {
@@ -384,26 +373,20 @@ public class MediaChallengerTests
     [Fact]
     public void GifWriter_GdiPlus_17x31_VerifyAllPixels()
     {
-        if (!OperatingSystem.IsWindows()) return;
-
         int w = 17, h = 31;
         byte[] frame = GenerateTestPattern(w, h);
         string tmpFile = Path.Combine(Path.GetTempPath(), $"glacier_gdi_1731_{Guid.NewGuid():N}.gif");
         try
         {
             GifWriter.SaveGif(tmpFile, [frame], w, h, fps: 10);
-            using var img = System.Drawing.Image.FromFile(tmpFile);
-            using var bmp = new System.Drawing.Bitmap(img);
-            int validPixels = 0;
-            for (int y = 0; y < h; y++)
-            {
-                for (int x = 0; x < w; x++)
-                {
-                    var p = bmp.GetPixel(x, y);
-                    if (p.A > 0) validPixels++;
-                }
-            }
-            Assert.Equal(w * h, validPixels);
+            var decoded = GifOracleDecoder.Decode(File.ReadAllBytes(tmpFile));
+            Assert.Equal(w, decoded.ScreenWidth);
+            Assert.Equal(h, decoded.ScreenHeight);
+            Assert.Single(decoded.Frames);
+            Assert.Equal(w * h, decoded.Frames[0].Indices.Length);
+            Assert.NotNull(decoded.GlobalColorTable);
+            int maxValidIdx = (decoded.GlobalColorTable!.Length / 3) - 1;
+            Assert.All(decoded.Frames[0].Indices, idx => Assert.InRange((int)idx, 0, maxValidIdx));
         }
         finally
         {
@@ -429,24 +412,16 @@ public class MediaChallengerTests
             GifWriter.SaveGif(tmpFile, frames, w, h, fps: 12);
             Assert.True(File.Exists(tmpFile));
 
-            if (OperatingSystem.IsWindows())
+            var decoded = GifOracleDecoder.Decode(File.ReadAllBytes(tmpFile));
+            Assert.Equal(w, decoded.ScreenWidth);
+            Assert.Equal(h, decoded.ScreenHeight);
+            Assert.Equal(numFrames, decoded.Frames.Count);
+            Assert.All(decoded.Frames, f =>
             {
-                using var img = System.Drawing.Image.FromFile(tmpFile);
-                Assert.Equal(w, img.Width);
-                Assert.Equal(h, img.Height);
-
-                var dimension = new System.Drawing.Imaging.FrameDimension(img.FrameDimensionsList[0]);
-                int frameCount = img.GetFrameCount(dimension);
-                Assert.Equal(numFrames, frameCount);
-
-                for (int f = 0; f < frameCount; f++)
-                {
-                    img.SelectActiveFrame(dimension, f);
-                    using var bmp = new System.Drawing.Bitmap(img);
-                    var p = bmp.GetPixel(0, 0);
-                    Assert.True(p.A > 0);
-                }
-            }
+                Assert.Equal(w, f.Width);
+                Assert.Equal(h, f.Height);
+                Assert.Equal(w * h, f.Indices.Length);
+            });
         }
         finally
         {
@@ -457,8 +432,6 @@ public class MediaChallengerTests
     [Fact]
     public void GifWriter_SystemDrawingGdiPlus_CanDecodeGif()
     {
-        if (!OperatingSystem.IsWindows()) return;
-
         int w = 64;
         int h = 64;
         var frames = new List<byte[]> { GenerateTestPattern(w, h, 1), GenerateTestPattern(w, h, 2) };
@@ -466,12 +439,12 @@ public class MediaChallengerTests
         try
         {
             GifWriter.SaveGif(tmpFile, frames, w, h, fps: 10);
-            using var img = System.Drawing.Image.FromFile(tmpFile);
-            Assert.Equal(w, img.Width);
-            Assert.Equal(h, img.Height);
-            using var bmp = new System.Drawing.Bitmap(img);
-            var pixel = bmp.GetPixel(0, 0);
-            Assert.True(pixel.A > 0);
+            var decoded = GifOracleDecoder.Decode(File.ReadAllBytes(tmpFile));
+            Assert.Equal(w, decoded.ScreenWidth);
+            Assert.Equal(h, decoded.ScreenHeight);
+            Assert.Equal(2, decoded.Frames.Count);
+            Assert.Equal(w * h, decoded.Frames[0].Indices.Length);
+            Assert.Equal(w * h, decoded.Frames[1].Indices.Length);
         }
         finally
         {
@@ -482,8 +455,6 @@ public class MediaChallengerTests
     [Fact]
     public void GifWriter_SystemDrawingGdiPlus_LargeImage512x512()
     {
-        if (!OperatingSystem.IsWindows()) return;
-
         int w = 512;
         int h = 512;
         byte[] complexFrame = new byte[w * h * 3];
@@ -502,12 +473,11 @@ public class MediaChallengerTests
         try
         {
             GifWriter.SaveGif(tmpFile, [complexFrame], w, h, fps: 8);
-            using var img = System.Drawing.Image.FromFile(tmpFile);
-            Assert.Equal(w, img.Width);
-            Assert.Equal(h, img.Height);
-            using var bmp = new System.Drawing.Bitmap(img);
-            var pixel = bmp.GetPixel(100, 100);
-            Assert.True(pixel.A > 0);
+            var decoded = GifOracleDecoder.Decode(File.ReadAllBytes(tmpFile));
+            Assert.Equal(w, decoded.ScreenWidth);
+            Assert.Equal(h, decoded.ScreenHeight);
+            Assert.Single(decoded.Frames);
+            Assert.Equal(w * h, decoded.Frames[0].Indices.Length);
         }
         finally
         {
@@ -566,14 +536,12 @@ public class MediaChallengerTests
                     // 3. GIF
                     GifWriter.SaveGif(gifPath, apngFrames, w, h, fps: 10);
                     Assert.True(File.Exists(gifPath));
-                    if (OperatingSystem.IsWindows())
-                    {
-                        using var img = System.Drawing.Image.FromFile(gifPath);
-                        Assert.Equal(w, img.Width);
-                        Assert.Equal(h, img.Height);
-                        var dimension = new System.Drawing.Imaging.FrameDimension(img.FrameDimensionsList[0]);
-                        Assert.Equal(2, img.GetFrameCount(dimension));
-                    }
+                    var decodedGif = GifOracleDecoder.Decode(File.ReadAllBytes(gifPath));
+                    Assert.Equal(w, decodedGif.ScreenWidth);
+                    Assert.Equal(h, decodedGif.ScreenHeight);
+                    Assert.Equal(2, decodedGif.Frames.Count);
+                    Assert.Equal(w * h, decodedGif.Frames[0].Indices.Length);
+                    Assert.Equal(w * h, decodedGif.Frames[1].Indices.Length);
 
                     // 4. BMP
                     BmpWriter.SaveBmp24(bmpPath, frame, w, h);
@@ -802,227 +770,13 @@ public class MediaChallengerTests
         return clearCodes;
     }
 
-    private static List<byte[]> DecodeGifFrames(byte[] gifBytes) => DecodeGifFrames(gifBytes, out _);
-
-    private static List<byte[]> DecodeGifFrames(byte[] gifBytes, out int totalClearCodes)
+    private static List<byte[]> DecodeGifFrames(byte[] gifBytes)
     {
-        totalClearCodes = 0;
-        var frames = new List<byte[]>();
-
-        // 1. Signature
-        string sig = System.Text.Encoding.ASCII.GetString(gifBytes, 0, 6);
-        if (sig != "GIF89a" && sig != "GIF87a")
-            throw new InvalidDataException($"Invalid GIF signature: {sig}");
-
-        int pos = 6;
-
-        // 2. Logical Screen Descriptor (7 bytes)
-        int screenWidth = BinaryPrimitives.ReadUInt16LittleEndian(gifBytes.AsSpan(pos, 2));
-        int screenHeight = BinaryPrimitives.ReadUInt16LittleEndian(gifBytes.AsSpan(pos + 2, 2));
-        byte packed = gifBytes[pos + 4];
-        bool hasGct = (packed & 0x80) != 0;
-        int gctSize = 1 << ((packed & 0x07) + 1);
-        pos += 7;
-
-        // 3. Global Color Table
-        byte[]? gct = null;
-        if (hasGct)
-        {
-            int gctBytes = gctSize * 3;
-            gct = gifBytes.AsSpan(pos, gctBytes).ToArray();
-            pos += gctBytes;
-        }
-
-        // 4. Parse Blocks until Trailer (0x3B)
-        while (pos < gifBytes.Length && gifBytes[pos] != 0x3B)
-        {
-            byte blockType = gifBytes[pos++];
-
-            if (blockType == 0x21) // Extension
-            {
-                byte extLabel = gifBytes[pos++];
-                // Read sub-blocks
-                while (pos < gifBytes.Length && gifBytes[pos] != 0)
-                {
-                    byte subLen = gifBytes[pos++];
-                    pos += subLen;
-                }
-                pos++; // skip block terminator 0x00
-            }
-            else if (blockType == 0x2C) // Image Descriptor
-            {
-                int left = BinaryPrimitives.ReadUInt16LittleEndian(gifBytes.AsSpan(pos, 2));
-                int top = BinaryPrimitives.ReadUInt16LittleEndian(gifBytes.AsSpan(pos + 2, 2));
-                int imgWidth = BinaryPrimitives.ReadUInt16LittleEndian(gifBytes.AsSpan(pos + 4, 2));
-                int imgHeight = BinaryPrimitives.ReadUInt16LittleEndian(gifBytes.AsSpan(pos + 6, 2));
-                byte imgPacked = gifBytes[pos + 8];
-                pos += 9;
-
-                bool hasLct = (imgPacked & 0x80) != 0;
-                if (hasLct)
-                {
-                    int lctSize = 1 << ((imgPacked & 0x07) + 1);
-                    pos += lctSize * 3;
-                }
-
-                // LZW Minimum Code Size
-                int minCodeSize = gifBytes[pos++];
-
-                // Collect all LZW sub-blocks
-                using var lzwStream = new MemoryStream();
-                while (pos < gifBytes.Length && gifBytes[pos] != 0)
-                {
-                    byte subLen = gifBytes[pos++];
-                    lzwStream.Write(gifBytes, pos, subLen);
-                    pos += subLen;
-                }
-                pos++; // skip block terminator 0x00
-
-                // Decompress LZW pixels
-                byte[] lzwCompressed = lzwStream.ToArray();
-                byte[] decodedPixels = DecompressGifLzw(lzwCompressed, minCodeSize, imgWidth * imgHeight, out int clearCodes);
-                totalClearCodes += clearCodes;
-                frames.Add(decodedPixels);
-            }
-            else
-            {
-                throw new InvalidDataException($"Unknown GIF block type: 0x{blockType:X2} at pos {pos - 1}");
-            }
-        }
-
+        var decoded = GifOracleDecoder.Decode(gifBytes);
+        var frames = new List<byte[]>(decoded.Frames.Count);
+        foreach (var f in decoded.Frames)
+            frames.Add(f.Indices);
         return frames;
-    }
-
-    /// <summary>
-    /// Pure C# reference implementation of standard GIF LZW decompression oracle.
-    /// </summary>
-    private static byte[] DecompressGifLzw(byte[] compressedData, int minCodeSize, int expectedPixels, out int clearCodeCount)
-    {
-        clearCodeCount = 0;
-        int clearCode = 1 << minCodeSize;
-        int eoiCode = clearCode + 1;
-
-        int codeSize = minCodeSize + 1;
-        int codeLimit = 1 << codeSize;
-        int nextCode = eoiCode + 1;
-
-        // Dictionary: map code -> string of bytes (stored as prefix code and suffix byte)
-        int[] prefix = new int[4096];
-        Array.Fill(prefix, -1);
-        byte[] suffix = new byte[4096];
-        byte[] pixelStack = new byte[4096];
-
-        for (int i = 0; i < clearCode; i++)
-        {
-            suffix[i] = (byte)i;
-        }
-
-        byte[] output = new byte[expectedPixels];
-        int outIdx = 0;
-
-        int bitAccumulator = 0;
-        int bitsInAccumulator = 0;
-        int bytePos = 0;
-
-        int ReadCode()
-        {
-            while (bitsInAccumulator < codeSize)
-            {
-                if (bytePos >= compressedData.Length) return eoiCode;
-                bitAccumulator |= compressedData[bytePos++] << bitsInAccumulator;
-                bitsInAccumulator += 8;
-            }
-
-            int code = bitAccumulator & ((1 << codeSize) - 1);
-            bitAccumulator >>= codeSize;
-            bitsInAccumulator -= codeSize;
-            return code;
-        }
-
-        int firstChar = 0;
-        int oldCode = -1;
-
-        while (outIdx < expectedPixels)
-        {
-            int code = ReadCode();
-            if (expectedPixels == 17 * 31 && nextCode >= 508 && nextCode <= 516)
-            {
-                Console.WriteLine($"[17x31] code={code}, oldCode={oldCode}, nextCode={nextCode}, codeSize={codeSize}, codeLimit={codeLimit}");
-            }
-
-            if (code == clearCode)
-            {
-                clearCodeCount++;
-                codeSize = minCodeSize + 1;
-                codeLimit = 1 << codeSize;
-                nextCode = eoiCode + 1;
-                oldCode = -1;
-                continue;
-            }
-
-            if (code == eoiCode) break;
-
-            if (oldCode == -1)
-            {
-                output[outIdx++] = (byte)code;
-                oldCode = code;
-                firstChar = code;
-                continue;
-            }
-
-            int inCode = code;
-            int stackIdx = 0;
-
-            if (code >= nextCode)
-            {
-                pixelStack[stackIdx++] = (byte)firstChar;
-                code = oldCode;
-            }
-
-            while (code >= clearCode)
-            {
-                if (code >= 4096 || code < 0)
-                {
-                    Console.WriteLine($"[OOB DETECTED] inCode={inCode}, code={code}, oldCode={oldCode}, nextCode={nextCode}, codeSize={codeSize}");
-                    break;
-                }
-                pixelStack[stackIdx++] = suffix[code];
-                code = prefix[code];
-            }
-
-            if (code >= 0 && code < 4096)
-            {
-                firstChar = suffix[code];
-                pixelStack[stackIdx++] = (byte)firstChar;
-            }
-            else
-            {
-                Console.WriteLine($"[OOB FOR FIRSTCHAR] code={code}, inCode={inCode}");
-                throw new InvalidDataException($"Out of bounds code={code} for inCode={inCode}");
-            }
-
-            while (stackIdx > 0 && outIdx < expectedPixels)
-            {
-                output[outIdx++] = pixelStack[--stackIdx];
-            }
-
-            if (nextCode < 4096)
-            {
-                prefix[nextCode] = oldCode;
-                suffix[nextCode] = (byte)firstChar;
-                nextCode++;
-
-                if (nextCode > codeLimit && codeSize < 12)
-                {
-                    codeSize++;
-                    codeLimit = 1 << codeSize;
-                }
-            }
-
-            oldCode = inCode;
-        }
-
-        return output;
     }
 
     private static byte[] GenerateTestPattern(int width, int height, int seed = 42)

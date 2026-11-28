@@ -590,6 +590,7 @@ public class VideoProductionTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void WanDiT_PredictVelocity_Gpu_WithTextContext_MatchesPyTorchReference()
     {
         if (!Glacier.Inference.Gpu.GpuContext.IsSupported) return;
@@ -671,6 +672,7 @@ public class VideoProductionTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void WanDiT_TestCFG_WithPaddedTokens()
     {
         if (!Glacier.Inference.Gpu.GpuContext.IsSupported) return;
@@ -812,6 +814,7 @@ public class VideoProductionTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void WanDiT_Step0_ParityWithDiffusers()
     {
         string repoDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -917,6 +920,7 @@ public class VideoProductionTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void WanPipeline_5Step_ExactDiffusersEquivalence()
     {
         string repoDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),

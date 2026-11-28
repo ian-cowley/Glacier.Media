@@ -29,6 +29,7 @@ public sealed class VoicePipeline : IDisposable
     public WhisperEngine Stt => _stt;
     public KokoroTtsEngine Tts => _tts;
     public KittenTtsEngine? NeuralTts => _kittenTts;
+    public bool IsNeuralSynthesis => _kittenTts != null;
 
     public VoicePipeline()
     {

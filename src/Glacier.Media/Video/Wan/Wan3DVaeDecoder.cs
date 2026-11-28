@@ -7,7 +7,9 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Threading.Tasks;
+using Glacier.Inference.Diagnostics;
 using Glacier.Inference.Format;
+using Glacier.Inference.Gpu;
 
 /// <summary>
 /// Production Pure C# 3D Spatio-Temporal Causal Variational Autoencoder (VAE) Decoder for Wan 2.1 Video.
@@ -39,26 +41,53 @@ public unsafe sealed partial class Wan3DVaeDecoder : IDisposable
         1.6382f, 1.1253f, 2.8251f, 1.9160f
     ];
 
-    public Wan3DVaeDecoder(SafetensorsFile weights)
+    public Wan3DVaeDecoder(SafetensorsFile weights, bool enableGpu = true)
     {
+        ArgumentNullException.ThrowIfNull(weights);
         _weights = weights;
-        PreloadWeights();
+
+        if (enableGpu && GpuContext.IsSupported)
+        {
+            try
+            {
+                _gpu = new GpuContext(0);
+                byte[] cubin = KernelCompiler.GetOrCompileKernels(_gpu.ArchString);
+                CuDriver.Check(CuDriver.ModuleLoadData(out _gpuModule, cubin), "ModuleLoadData");
+                CuDriver.Check(CuDriver.ModuleGetFunction(out _fnConv2d3x3, _gpuModule, "conv2d_3x3"), "conv2d_3x3");
+                CuDriver.Check(CuDriver.ModuleGetFunction(out _fnConv2d1x1, _gpuModule, "conv2d_1x1"), "conv2d_1x1");
+                CuDriver.Check(CuDriver.ModuleGetFunction(out _fnUpsample2x, _gpuModule, "upsample2x_nearest"), "upsample2x_nearest");
+                CuDriver.Check(CuDriver.ModuleGetFunction(out _fnTensorAdd, _gpuModule, "tensor_add"), "tensor_add");
+                CuDriver.Check(CuDriver.ModuleGetFunction(out _fnVaeClampRgb, _gpuModule, "vae_clamp_rgb"), "vae_clamp_rgb");
+                CuDriver.Check(CuDriver.ModuleGetFunction(out _fnWanRmsNormSilu, _gpuModule, "wan_rmsnorm_silu"), "wan_rmsnorm_silu");
+                CuDriver.Check(CuDriver.ModuleGetFunction(out _fnWanSpatialAttn, _gpuModule, "wan_spatial_attention"), "wan_spatial_attention");
+                GlacierDiagnostics.LogInformation($"[Wan3DVaeDecoder] Initialized CUDA backend on {_gpu.DeviceName} ({_gpu.ArchString}).");
+            }
+            catch (Exception ex)
+            {
+                GlacierDiagnostics.LogWarning($"[Wan3DVaeDecoder] GPU init skipped [{ex.GetType().Name}]: {ex.Message}, falling back to CPU SIMD.", ex);
+                if (_gpuModule != IntPtr.Zero)
+                {
+                    CuDriver.ModuleUnload(_gpuModule);
+                    _gpuModule = IntPtr.Zero;
+                }
+                _gpu?.Dispose();
+                _gpu = null;
+            }
+        }
     }
 
     public static Wan3DVaeDecoder Open(string safetensorsPath, bool enableGpu = true)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(safetensorsPath);
         var sf = SafetensorsFile.Open(safetensorsPath);
-        return new Wan3DVaeDecoder(sf);
-    }
-
-    private void PreloadWeights()
-    {
-        foreach (var name in _weights.Tensors.Keys)
+        try
         {
-            if (name.StartsWith("decoder.") || name.StartsWith("conv2."))
-            {
-                _tensorCache[name] = LoadTensorFloats(_weights, name);
-            }
+            return new Wan3DVaeDecoder(sf, enableGpu);
+        }
+        catch
+        {
+            sf.Dispose();
+            throw;
         }
     }
 
@@ -124,6 +153,30 @@ public unsafe sealed partial class Wan3DVaeDecoder : IDisposable
     /// Decodes spatio-temporal latents [T_lat, 16, H_lat, W_lat] into continuous 24-bit sRGB video frames.
     /// </summary>
     public List<byte[]> DecodeVideo(
+        ReadOnlySpan<float> spatioTemporalLatents,
+        int temporalLatentFrames,
+        int targetFrames,
+        int latentH,
+        int latentW)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_gpu != null)
+        {
+            try
+            {
+                return DecodeVideoGpu(spatioTemporalLatents, temporalLatentFrames, targetFrames, latentH, latentW);
+            }
+            catch (Exception ex)
+            {
+                GlacierDiagnostics.LogWarning($"[Wan3DVaeDecoder] GPU decode failed [{ex.GetType().Name}]: {ex.Message}. Falling back to CPU SIMD.", ex);
+            }
+        }
+
+        return DecodeVideoCpu(spatioTemporalLatents, temporalLatentFrames, targetFrames, latentH, latentW);
+    }
+
+    private List<byte[]> DecodeVideoCpu(
         ReadOnlySpan<float> spatioTemporalLatents,
         int temporalLatentFrames,
         int targetFrames,
@@ -387,11 +440,9 @@ public unsafe sealed partial class Wan3DVaeDecoder : IDisposable
         // 5. Add residual identity
         for (int k = 0; k < conv2Frames.Count; k++)
         {
-            float[] outFrame = conv2Frames[k];
-            float[] inFrame = inputFrames[k];
-            for (int i = 0; i < outC * spatial; i++)
+            fixed (float* pOut = conv2Frames[k], pIn = inputFrames[k])
             {
-                outFrame[i] += inFrame[i];
+                AddInPlaceSimd(pOut, pIn, outC * spatial);
             }
         }
 
@@ -458,11 +509,9 @@ public unsafe sealed partial class Wan3DVaeDecoder : IDisposable
         // 6. Add shortcut
         for (int k = 0; k < conv2Frames.Count; k++)
         {
-            float[] outFrame = conv2Frames[k];
-            float[] scFrame = shortcutFrames[k];
-            for (int i = 0; i < outC * spatial; i++)
+            fixed (float* pOut = conv2Frames[k], pSc = shortcutFrames[k])
             {
-                outFrame[i] += scFrame[i];
+                AddInPlaceSimd(pOut, pSc, outC * spatial);
             }
         }
 
@@ -635,9 +684,9 @@ public unsafe sealed partial class Wan3DVaeDecoder : IDisposable
             }
 
             // 5. Add residual
-            for (int i = 0; i < channels * spatial; i++)
+            fixed (float* pOut = projOut, pIn = frame)
             {
-                projOut[i] += frame[i];
+                AddInPlaceSimd(pOut, pIn, channels * spatial);
             }
 
             outputFrames.Add(projOut);
@@ -652,6 +701,28 @@ public unsafe sealed partial class Wan3DVaeDecoder : IDisposable
         if (!_disposed)
         {
             _disposed = true;
+            if (_gpu != null)
+            {
+                foreach (var kvp in _gpuWeights)
+                {
+                    if (kvp.Value != IntPtr.Zero) _gpu.FreeDevice(kvp.Value);
+                }
+                _gpuWeights.Clear();
+
+                foreach (var kvp in _gpuDeinterleavedWeights)
+                {
+                    if (kvp.Value.W0 != IntPtr.Zero) _gpu.FreeDevice(kvp.Value.W0);
+                    if (kvp.Value.W1 != IntPtr.Zero) _gpu.FreeDevice(kvp.Value.W1);
+                    if (kvp.Value.W2 != IntPtr.Zero) _gpu.FreeDevice(kvp.Value.W2);
+                }
+                _gpuDeinterleavedWeights.Clear();
+
+                if (_gpuModule != IntPtr.Zero)
+                {
+                    CuDriver.ModuleUnload(_gpuModule);
+                }
+                _gpu.Dispose();
+            }
             _tensorCache.Clear();
             _weights.Dispose();
         }

@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
+using Glacier.Inference.Diagnostics;
 
 /// <summary>
 /// Grapheme-to-Phoneme (G2P) converter that maps English words to International Phonetic Alphabet (IPA) strings
@@ -76,9 +77,9 @@ public static class KittenPhonemizer
                     }
                 }
             }
-            catch
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
             {
-                // Fallback will supply pronunciations if dictionary file cannot be decompressed
+                GlacierDiagnostics.LogWarning($"Failed to load KittenTTS CMUDict '{foundPath}', using rule-based G2P fallback: {ex.Message}", ex);
             }
         }
 

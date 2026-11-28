@@ -29,7 +29,7 @@ public static unsafe class KittenTensorOps
                 }
                 sum += Vector512.Sum(vSum);
             }
-            else if (Vector256.IsHardwareAccelerated && length >= 8)
+            if (Vector256.IsHardwareAccelerated && i <= length - 8)
             {
                 var vSum = Vector256<float>.Zero;
                 for (; i <= length - 8; i += 8)
@@ -37,6 +37,15 @@ public static unsafe class KittenTensorOps
                     vSum = Vector256.FusedMultiplyAdd(Vector256.Load(pA + i), Vector256.Load(pB + i), vSum);
                 }
                 sum += Vector256.Sum(vSum);
+            }
+            if (Vector128.IsHardwareAccelerated && i <= length - 4)
+            {
+                var vSum = Vector128<float>.Zero;
+                for (; i <= length - 4; i += 4)
+                {
+                    vSum = Vector128.FusedMultiplyAdd(Vector128.Load(pA + i), Vector128.Load(pB + i), vSum);
+                }
+                sum += Vector128.Sum(vSum);
             }
             for (; i < length; i++)
             {
@@ -63,7 +72,7 @@ public static unsafe class KittenTensorOps
                 }
                 sum += Vector512.Sum(vSum);
             }
-            else if (Vector256.IsHardwareAccelerated && length >= 8)
+            if (Vector256.IsHardwareAccelerated && i <= length - 8)
             {
                 var vSum = Vector256<float>.Zero;
                 for (; i <= length - 8; i += 8)
@@ -71,6 +80,15 @@ public static unsafe class KittenTensorOps
                     vSum += Vector256.Load(pA + i);
                 }
                 sum += Vector256.Sum(vSum);
+            }
+            if (Vector128.IsHardwareAccelerated && i <= length - 4)
+            {
+                var vSum = Vector128<float>.Zero;
+                for (; i <= length - 4; i += 4)
+                {
+                    vSum += Vector128.Load(pA + i);
+                }
+                sum += Vector128.Sum(vSum);
             }
             for (; i < length; i++)
             {
@@ -84,12 +102,64 @@ public static unsafe class KittenTensorOps
     public static float Max(ReadOnlySpan<float> a)
     {
         if (a.IsEmpty) return 0f;
-        float max = a[0];
-        for (int i = 1; i < a.Length; i++)
+        int length = a.Length;
+        fixed (float* pA = a)
         {
-            if (a[i] > max) max = a[i];
+            float max = pA[0];
+            int i = 0;
+
+            if (Vector512.IsHardwareAccelerated && length >= 16)
+            {
+                var vMax = Vector512.Load(pA);
+                i = 16;
+                for (; i <= length - 16; i += 16)
+                {
+                    vMax = Vector512.Max(vMax, Vector512.Load(pA + i));
+                }
+                for (int lane = 0; lane < 16; lane++)
+                {
+                    float val = vMax[lane];
+                    if (val > max) max = val;
+                }
+            }
+
+            if (Vector256.IsHardwareAccelerated && i <= length - 8)
+            {
+                var vMax = Vector256.Load(pA + i);
+                i += 8;
+                for (; i <= length - 8; i += 8)
+                {
+                    vMax = Vector256.Max(vMax, Vector256.Load(pA + i));
+                }
+                for (int lane = 0; lane < 8; lane++)
+                {
+                    float val = vMax[lane];
+                    if (val > max) max = val;
+                }
+            }
+
+            if (Vector128.IsHardwareAccelerated && i <= length - 4)
+            {
+                var vMax = Vector128.Load(pA + i);
+                i += 4;
+                for (; i <= length - 4; i += 4)
+                {
+                    vMax = Vector128.Max(vMax, Vector128.Load(pA + i));
+                }
+                for (int lane = 0; lane < 4; lane++)
+                {
+                    float val = vMax[lane];
+                    if (val > max) max = val;
+                }
+            }
+
+            for (; i < length; i++)
+            {
+                float val = pA[i];
+                if (val > max) max = val;
+            }
+            return max;
         }
-        return max;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -171,31 +241,189 @@ public static unsafe class KittenTensorOps
             {
                 float baseBias = bPtr != null ? bPtr[oc] : 0.0f;
                 int ocOffset = oc * outLength;
+                float* pOutOc = outPtr + ocOffset;
 
-                for (int t = 0; t < outLength; t++)
+                if (stride == 1)
                 {
-                    float sum = baseBias;
-                    int inStart = t * stride - padding;
+                    FillConstant(pOutOc, outLength, baseBias);
 
-                    for (int ic = 0; ic < inChannels; ic++)
+                    int tStart = Math.Clamp(padding, 0, outLength);
+                    int tEnd = Math.Clamp(length + padding - effKernel + 1, tStart, outLength);
+
+                    for (int t = 0; t < tStart; t++)
                     {
-                        int icInOffset = ic * length;
-                        int icWOffset = (oc * inChannels + ic) * kernelSize;
+                        AccumulateConv1DScalarAtT(inPtr, wPtr, pOutOc, oc, inChannels, length, kernelSize, padding, stride, dilation, t);
+                    }
 
-                        for (int k = 0; k < kernelSize; k++)
+                    int interiorLen = tEnd - tStart;
+                    if (interiorLen > 0)
+                    {
+                        for (int ic = 0; ic < inChannels; ic++)
                         {
-                            int inIdx = inStart + k * dilation;
-                            if (inIdx >= 0 && inIdx < length)
+                            int icInOffset = ic * length;
+                            int icWOffset = (oc * inChannels + ic) * kernelSize;
+                            float* pDstInterior = pOutOc + tStart;
+
+                            for (int k = 0; k < kernelSize; k++)
                             {
-                                sum += inPtr[icInOffset + inIdx] * wPtr[icWOffset + k];
+                                float w = wPtr[icWOffset + k];
+                                if (w == 0.0f) continue;
+
+                                float* pSrcInterior = inPtr + icInOffset + (tStart - padding + k * dilation);
+                                AccumulateScaledSimd(pSrcInterior, pDstInterior, w, interiorLen);
                             }
                         }
                     }
 
-                    outPtr[ocOffset + t] = sum;
+                    for (int t = tEnd; t < outLength; t++)
+                    {
+                        AccumulateConv1DScalarAtT(inPtr, wPtr, pOutOc, oc, inChannels, length, kernelSize, padding, stride, dilation, t);
+                    }
+                }
+                else if (dilation == 1 && kernelSize >= 4)
+                {
+                    int tStart = padding <= 0 ? 0 : Math.Min(outLength, (padding + stride - 1) / stride);
+                    int maxIn = length + padding - kernelSize;
+                    int tEnd = maxIn < 0 ? tStart : Math.Clamp(maxIn / stride + 1, tStart, outLength);
+
+                    for (int t = 0; t < tStart; t++)
+                    {
+                        pOutOc[t] = baseBias;
+                        AccumulateConv1DScalarAtT(inPtr, wPtr, pOutOc, oc, inChannels, length, kernelSize, padding, stride, dilation, t);
+                    }
+
+                    for (int t = tStart; t < tEnd; t++)
+                    {
+                        float sum = baseBias;
+                        int inStart = t * stride - padding;
+                        for (int ic = 0; ic < inChannels; ic++)
+                        {
+                            var inSpan = new ReadOnlySpan<float>(inPtr + ic * length + inStart, kernelSize);
+                            var wSpan = new ReadOnlySpan<float>(wPtr + (oc * inChannels + ic) * kernelSize, kernelSize);
+                            sum += Dot(inSpan, wSpan);
+                        }
+                        pOutOc[t] = sum;
+                    }
+
+                    for (int t = tEnd; t < outLength; t++)
+                    {
+                        pOutOc[t] = baseBias;
+                        AccumulateConv1DScalarAtT(inPtr, wPtr, pOutOc, oc, inChannels, length, kernelSize, padding, stride, dilation, t);
+                    }
+                }
+                else
+                {
+                    for (int t = 0; t < outLength; t++)
+                    {
+                        pOutOc[t] = baseBias;
+                        AccumulateConv1DScalarAtT(inPtr, wPtr, pOutOc, oc, inChannels, length, kernelSize, padding, stride, dilation, t);
+                    }
                 }
             });
         }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void FillConstant(float* dst, int length, float value)
+    {
+        int i = 0;
+        if (Vector512.IsHardwareAccelerated && length >= 16)
+        {
+            var v = Vector512.Create(value);
+            for (; i <= length - 16; i += 16)
+                v.Store(dst + i);
+        }
+        if (Vector256.IsHardwareAccelerated && i <= length - 8)
+        {
+            var v = Vector256.Create(value);
+            for (; i <= length - 8; i += 8)
+                v.Store(dst + i);
+        }
+        if (Vector128.IsHardwareAccelerated && i <= length - 4)
+        {
+            var v = Vector128.Create(value);
+            for (; i <= length - 4; i += 4)
+                v.Store(dst + i);
+        }
+        for (; i < length; i++)
+        {
+            dst[i] = value;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AccumulateScaledSimd(float* src, float* dst, float w, int length)
+    {
+        int i = 0;
+        if (Vector512.IsHardwareAccelerated && length >= 16)
+        {
+            var vW = Vector512.Create(w);
+            for (; i <= length - 16; i += 16)
+            {
+                var vDst = Vector512.Load(dst + i);
+                vDst = Vector512.FusedMultiplyAdd(Vector512.Load(src + i), vW, vDst);
+                vDst.Store(dst + i);
+            }
+        }
+        if (Vector256.IsHardwareAccelerated && i <= length - 8)
+        {
+            var vW = Vector256.Create(w);
+            for (; i <= length - 8; i += 8)
+            {
+                var vDst = Vector256.Load(dst + i);
+                vDst = Vector256.FusedMultiplyAdd(Vector256.Load(src + i), vW, vDst);
+                vDst.Store(dst + i);
+            }
+        }
+        if (Vector128.IsHardwareAccelerated && i <= length - 4)
+        {
+            var vW = Vector128.Create(w);
+            for (; i <= length - 4; i += 4)
+            {
+                var vDst = Vector128.Load(dst + i);
+                vDst = Vector128.FusedMultiplyAdd(Vector128.Load(src + i), vW, vDst);
+                vDst.Store(dst + i);
+            }
+        }
+        for (; i < length; i++)
+        {
+            dst[i] += src[i] * w;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AccumulateConv1DScalarAtT(
+        float* inPtr,
+        float* wPtr,
+        float* pOutOc,
+        int oc,
+        int inChannels,
+        int length,
+        int kernelSize,
+        int padding,
+        int stride,
+        int dilation,
+        int t)
+    {
+        float sum = pOutOc[t];
+        int inStart = t * stride - padding;
+
+        for (int ic = 0; ic < inChannels; ic++)
+        {
+            int icInOffset = ic * length;
+            int icWOffset = (oc * inChannels + ic) * kernelSize;
+
+            for (int k = 0; k < kernelSize; k++)
+            {
+                int inIdx = inStart + k * dilation;
+                if ((uint)inIdx < (uint)length)
+                {
+                    sum += inPtr[icInOffset + inIdx] * wPtr[icWOffset + k];
+                }
+            }
+        }
+
+        pOutOc[t] = sum;
     }
 
     /// <summary>

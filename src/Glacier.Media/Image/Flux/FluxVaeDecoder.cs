@@ -76,8 +76,17 @@ public unsafe sealed partial class FluxVaeDecoder : IDisposable
 
     public static FluxVaeDecoder Open(string safetensorsPath, bool enableGpu = true)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(safetensorsPath);
         var sf = SafetensorsFile.Open(safetensorsPath);
-        return new FluxVaeDecoder(sf, enableGpu);
+        try
+        {
+            return new FluxVaeDecoder(sf, enableGpu);
+        }
+        catch
+        {
+            sf.Dispose();
+            throw;
+        }
     }
 
     private float* GetWeight(string name)

@@ -15,7 +15,6 @@ public sealed class KittenVoiceStore : IDisposable
 {
     private readonly Dictionary<string, float[]> _voices = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, float[]> _customVoices = new(StringComparer.OrdinalIgnoreCase);
-    private SafetensorsFile? _file;
 
     public IReadOnlyCollection<string> AvailableVoices
     {
@@ -37,25 +36,25 @@ public sealed class KittenVoiceStore : IDisposable
     public static KittenVoiceStore Load(string filePath)
     {
         var store = new KittenVoiceStore();
-        store._file = SafetensorsFile.Open(filePath);
-
-        unsafe
+        try
         {
-            foreach (var kvp in store._file.Tensors)
+            using var file = SafetensorsFile.Open(filePath);
+
+            foreach (var kvp in file.Tensors)
             {
                 if (kvp.Value.Shape.Length == 2 && kvp.Value.Shape[0] == 400 && kvp.Value.Shape[1] == 256)
                 {
-                    float[] data = new float[400 * 256];
-                    fixed (float* pDst = data)
-                    {
-                        Buffer.MemoryCopy(store._file.GetTensorPointer(kvp.Key), pDst, (long)kvp.Value.ByteSize, (long)kvp.Value.ByteSize);
-                    }
-                    store._voices[kvp.Key] = data;
+                    store._voices[kvp.Key] = KittenSafetensorsLoader.LoadFloat32Array(file, kvp.Key, expectedElementCount: 400 * 256);
                 }
             }
-        }
 
-        return store;
+            return store;
+        }
+        catch
+        {
+            store.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -100,7 +99,5 @@ public sealed class KittenVoiceStore : IDisposable
 
     public void Dispose()
     {
-        _file?.Dispose();
-        _file = null;
     }
 }

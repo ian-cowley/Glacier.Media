@@ -42,9 +42,9 @@ public sealed class KittenBiLstm
 
         unsafe
         {
-            float* pW = (float*)file.GetTensorPointer(wName);
-            float* pR = (float*)file.GetTensorPointer(rName);
-            float* pB = (float*)file.GetTensorPointer(bName);
+            float* pW = KittenSafetensorsLoader.ValidateAndGetFloat32Pointer(file, wName, out _, out _, expectedElementCount: 2 * h4 * inputSize);
+            float* pR = KittenSafetensorsLoader.ValidateAndGetFloat32Pointer(file, rName, out _, out _, expectedElementCount: 2 * h4 * hiddenSize);
+            float* pB = KittenSafetensorsLoader.ValidateAndGetFloat32Pointer(file, bName, out _, out _, expectedElementCount: 2 * 8 * hiddenSize);
 
             fixed (float* pWf = _wFwd, pWb = _wBwd)
             {

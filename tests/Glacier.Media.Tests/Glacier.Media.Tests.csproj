@@ -8,14 +8,13 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>preview</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <NoWarn>$(NoWarn);CS1591;CS8981;CA1416</NoWarn>
+    <NoWarn>$(NoWarn);CS1591;CS8981</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
-    <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
-    <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.0.2">
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
@@ -28,6 +27,6 @@
     <ProjectReference Include="../../../Glacier.Inference/src/Glacier.Inference/Glacier.Inference.csproj" />
   </ItemGroup>
   <ItemGroup Condition="!Exists('../../../Glacier.Inference/src/Glacier.Inference/Glacier.Inference.csproj') or '$(UseLocalProjectReferences)' == 'false'">
-    <PackageReference Include="Glacier.Inference" Version="1.10.1" />
+    <PackageReference Include="Glacier.Inference" />
   </ItemGroup>
 </Project>

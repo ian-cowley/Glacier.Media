@@ -3,6 +3,8 @@ namespace Glacier.Media.Audio.Kitten;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security;
+using Glacier.Inference.Diagnostics;
 using Glacier.Inference.Format;
 
 /// <summary>
@@ -25,6 +27,8 @@ public sealed class KittenTtsEngine : IDisposable
     private bool _disposed;
 
     public int SampleRate => _config.SampleRate;
+    public bool IsNeural => true;
+    public string ActiveBackend => "CpuSimd";
     public IReadOnlyCollection<string> AvailableVoices => _voiceStore.AvailableVoices;
 
     public KittenTtsEngine(string modelPath, string voicesPath, string? configPath = null)
@@ -38,13 +42,22 @@ public sealed class KittenTtsEngine : IDisposable
             ? KittenConfig.Load(configPath)
             : KittenConfig.Default;
 
-        _modelFile = SafetensorsFile.Open(modelPath);
-        _voiceStore = KittenVoiceStore.Load(voicesPath);
+        try
+        {
+            _modelFile = SafetensorsFile.Open(modelPath);
+            _voiceStore = KittenVoiceStore.Load(voicesPath);
 
-        _albert = new AlbertEncoder(_modelFile);
-        _textEncoder = new KittenTextEncoder(_modelFile);
-        _predictor = new KittenPredictor(_modelFile);
-        _decoder = new KittenDecoder(_modelFile, _config);
+            _albert = new AlbertEncoder(_modelFile);
+            _textEncoder = new KittenTextEncoder(_modelFile);
+            _predictor = new KittenPredictor(_modelFile);
+            _decoder = new KittenDecoder(_modelFile, _config);
+        }
+        catch
+        {
+            _voiceStore?.Dispose();
+            _modelFile?.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -83,7 +96,10 @@ public sealed class KittenTtsEngine : IDisposable
                     break;
                 }
             }
-            catch { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or SecurityException)
+            {
+                GlacierDiagnostics.LogWarning($"Skipped KittenTTS search path '{dir}': {ex.Message}", ex);
+            }
         }
 
         if (foundModel == null || foundVoices == null)

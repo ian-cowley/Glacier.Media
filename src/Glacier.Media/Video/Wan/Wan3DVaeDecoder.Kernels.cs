@@ -512,29 +512,87 @@ public unsafe sealed partial class Wan3DVaeDecoder
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AddInPlaceSimd(float* dst, float* src, int count)
+    {
+        int i = 0;
+        if (Vector512.IsHardwareAccelerated && count >= 16)
+        {
+            for (; i <= count - 16; i += 16)
+            {
+                (Vector512.Load(dst + i) + Vector512.Load(src + i)).Store(dst + i);
+            }
+        }
+        if (Vector256.IsHardwareAccelerated && i <= count - 8)
+        {
+            for (; i <= count - 8; i += 8)
+            {
+                (Vector256.Load(dst + i) + Vector256.Load(src + i)).Store(dst + i);
+            }
+        }
+        if (Vector128.IsHardwareAccelerated && i <= count - 4)
+        {
+            for (; i <= count - 4; i += 4)
+            {
+                (Vector128.Load(dst + i) + Vector128.Load(src + i)).Store(dst + i);
+            }
+        }
+        for (; i < count; i++)
+        {
+            dst[i] += src[i];
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void Upsample2x_Nearest(float* src, float* dst, int channels, int inH, int inW)
     {
         int outH = inH * 2;
         int outW = inW * 2;
         int inSpatial = inH * inW;
         int outSpatial = outH * outW;
+        nuint rowBytes = (nuint)((long)outW * sizeof(float));
 
         Parallel.For(0, channels, c =>
         {
             float* pSrcC = src + (long)c * inSpatial;
             float* pDstC = dst + (long)c * outSpatial;
 
-            for (int y = 0; y < outH; y++)
+            for (int inY = 0; inY < inH; inY++)
             {
-                int inY = y / 2;
-                long rIn = (long)inY * inW;
-                long rOut = (long)y * outW;
+                float* pSrcRow = pSrcC + (long)inY * inW;
+                float* pDstRow0 = pDstC + (long)(inY * 2) * outW;
+                float* pDstRow1 = pDstRow0 + outW;
 
-                for (int x = 0; x < outW; x++)
+                int x = 0;
+                if (Vector256.IsHardwareAccelerated && inW >= 8)
                 {
-                    int inX = x / 2;
-                    pDstC[rOut + x] = pSrcC[rIn + inX];
+                    var idxLo = Vector128.Create(0, 0, 1, 1);
+                    var idxHi = Vector128.Create(2, 2, 3, 3);
+                    for (; x <= inW - 8; x += 8)
+                    {
+                        var v = Vector256.Load(pSrcRow + x);
+                        Vector256.Create(Vector128.Shuffle(v.GetLower(), idxLo), Vector128.Shuffle(v.GetLower(), idxHi)).Store(pDstRow0 + x * 2);
+                        Vector256.Create(Vector128.Shuffle(v.GetUpper(), idxLo), Vector128.Shuffle(v.GetUpper(), idxHi)).Store(pDstRow0 + x * 2 + 8);
+                    }
                 }
+                if (Vector128.IsHardwareAccelerated && x <= inW - 4)
+                {
+                    var idxLo = Vector128.Create(0, 0, 1, 1);
+                    var idxHi = Vector128.Create(2, 2, 3, 3);
+                    for (; x <= inW - 4; x += 4)
+                    {
+                        var v = Vector128.Load(pSrcRow + x);
+                        Vector128.Shuffle(v, idxLo).Store(pDstRow0 + x * 2);
+                        Vector128.Shuffle(v, idxHi).Store(pDstRow0 + x * 2 + 4);
+                    }
+                }
+                for (; x < inW; x++)
+                {
+                    float val = pSrcRow[x];
+                    pDstRow0[x * 2] = val;
+                    pDstRow0[x * 2 + 1] = val;
+                }
+
+                Buffer.MemoryCopy(pDstRow0, pDstRow1, rowBytes, rowBytes);
             }
         });
     }
@@ -543,21 +601,95 @@ public unsafe sealed partial class Wan3DVaeDecoder
     private static void ClampToRgb(float* srcPlanar, byte* dstRgb, int H, int W)
     {
         int spatial = H * W;
+        const int tileSize = 1024;
+        int numTiles = (spatial + tileSize - 1) / tileSize;
 
-        Parallel.For(0, spatial, s =>
+        Parallel.For(0, numTiles, tileIdx =>
         {
-            float r = srcPlanar[0 * spatial + s];
-            float g = srcPlanar[1 * spatial + s];
-            float b = srcPlanar[2 * spatial + s];
+            int sStart = tileIdx * tileSize;
+            int sEnd = Math.Min(sStart + tileSize, spatial);
+            int s = sStart;
 
-            int ir = (int)((r * 0.5f + 0.5f) * 255.0f);
-            int ig = (int)((g * 0.5f + 0.5f) * 255.0f);
-            int ib = (int)((b * 0.5f + 0.5f) * 255.0f);
+            if (Vector256.IsHardwareAccelerated && sEnd - sStart >= 8)
+            {
+                var vHalf = Vector256.Create(0.5f);
+                var vScale = Vector256.Create(255.0f);
+                var vZero = Vector256<float>.Zero;
+                int* tmpR = stackalloc int[8];
+                int* tmpG = stackalloc int[8];
+                int* tmpB = stackalloc int[8];
 
-            int dstIdx = s * 3;
-            dstRgb[dstIdx]     = (byte)(ir < 0 ? 0 : (ir > 255 ? 255 : ir));
-            dstRgb[dstIdx + 1] = (byte)(ig < 0 ? 0 : (ig > 255 ? 255 : ig));
-            dstRgb[dstIdx + 2] = (byte)(ib < 0 ? 0 : (ib > 255 ? 255 : ib));
+                for (; s <= sEnd - 8; s += 8)
+                {
+                    var vr = Vector256.FusedMultiplyAdd(Vector256.Load(srcPlanar + s), vHalf, vHalf) * vScale;
+                    var vg = Vector256.FusedMultiplyAdd(Vector256.Load(srcPlanar + spatial + s), vHalf, vHalf) * vScale;
+                    var vb = Vector256.FusedMultiplyAdd(Vector256.Load(srcPlanar + (long)spatial * 2 + s), vHalf, vHalf) * vScale;
+
+                    vr = Vector256.Min(Vector256.Max(vr, vZero), vScale);
+                    vg = Vector256.Min(Vector256.Max(vg, vZero), vScale);
+                    vb = Vector256.Min(Vector256.Max(vb, vZero), vScale);
+
+                    Vector256.ConvertToInt32(vr).Store(tmpR);
+                    Vector256.ConvertToInt32(vg).Store(tmpG);
+                    Vector256.ConvertToInt32(vb).Store(tmpB);
+
+                    for (int k = 0; k < 8; k++)
+                    {
+                        int dstIdx = (s + k) * 3;
+                        dstRgb[dstIdx] = (byte)tmpR[k];
+                        dstRgb[dstIdx + 1] = (byte)tmpG[k];
+                        dstRgb[dstIdx + 2] = (byte)tmpB[k];
+                    }
+                }
+            }
+            else if (Vector128.IsHardwareAccelerated && sEnd - sStart >= 4)
+            {
+                var vHalf = Vector128.Create(0.5f);
+                var vScale = Vector128.Create(255.0f);
+                var vZero = Vector128<float>.Zero;
+                int* tmpR = stackalloc int[4];
+                int* tmpG = stackalloc int[4];
+                int* tmpB = stackalloc int[4];
+
+                for (; s <= sEnd - 4; s += 4)
+                {
+                    var vr = Vector128.FusedMultiplyAdd(Vector128.Load(srcPlanar + s), vHalf, vHalf) * vScale;
+                    var vg = Vector128.FusedMultiplyAdd(Vector128.Load(srcPlanar + spatial + s), vHalf, vHalf) * vScale;
+                    var vb = Vector128.FusedMultiplyAdd(Vector128.Load(srcPlanar + (long)spatial * 2 + s), vHalf, vHalf) * vScale;
+
+                    vr = Vector128.Min(Vector128.Max(vr, vZero), vScale);
+                    vg = Vector128.Min(Vector128.Max(vg, vZero), vScale);
+                    vb = Vector128.Min(Vector128.Max(vb, vZero), vScale);
+
+                    Vector128.ConvertToInt32(vr).Store(tmpR);
+                    Vector128.ConvertToInt32(vg).Store(tmpG);
+                    Vector128.ConvertToInt32(vb).Store(tmpB);
+
+                    for (int k = 0; k < 4; k++)
+                    {
+                        int dstIdx = (s + k) * 3;
+                        dstRgb[dstIdx] = (byte)tmpR[k];
+                        dstRgb[dstIdx + 1] = (byte)tmpG[k];
+                        dstRgb[dstIdx + 2] = (byte)tmpB[k];
+                    }
+                }
+            }
+
+            for (; s < sEnd; s++)
+            {
+                float r = srcPlanar[s];
+                float g = srcPlanar[spatial + s];
+                float b = srcPlanar[(long)spatial * 2 + s];
+
+                int ir = (int)((r * 0.5f + 0.5f) * 255.0f);
+                int ig = (int)((g * 0.5f + 0.5f) * 255.0f);
+                int ib = (int)((b * 0.5f + 0.5f) * 255.0f);
+
+                int dstIdx = s * 3;
+                dstRgb[dstIdx] = (byte)(ir < 0 ? 0 : (ir > 255 ? 255 : ir));
+                dstRgb[dstIdx + 1] = (byte)(ig < 0 ? 0 : (ig > 255 ? 255 : ig));
+                dstRgb[dstIdx + 2] = (byte)(ib < 0 ? 0 : (ib > 255 ? 255 : ib));
+            }
         });
     }
 }

@@ -220,6 +220,7 @@ public class DiffusionGgufTests
     }
 
     [CudaFact(false)]
+    [Trait("Hardware", "Gpu")]
     public void GpuContext_InspectVramAndKernel()
     {
         if (!Glacier.Inference.Gpu.GpuContext.IsSupported) return;
@@ -229,6 +230,7 @@ public class DiffusionGgufTests
     }
 
     [Fact]
+    [Trait("Hardware", "Gpu")]
     public void D3D12Context_InspectAdapters()
     {
         if (!OperatingSystem.IsWindows()) return;
@@ -245,6 +247,7 @@ public class DiffusionGgufTests
     }
 
     [CudaFact(false)]
+    [Trait("Hardware", "Gpu")]
     public unsafe void GpuContext_VerifyBatchedGemmQ4K()
     {
         if (!Glacier.Inference.Gpu.GpuContext.IsSupported) return;
@@ -368,6 +371,7 @@ public class DiffusionGgufTests
     }
 
     [CudaFact(false)]
+    [Trait("Hardware", "Gpu")]
     public void GpuContext_TestLargeVramAllocation()
     {
         if (!Glacier.Inference.Gpu.GpuContext.IsSupported) return;
@@ -383,6 +387,7 @@ public class DiffusionGgufTests
     }
 
     [CudaFact(false)]
+    [Trait("Hardware", "Gpu")]
     public unsafe void GpuContext_BenchmarkFluxGemm()
     {
         if (!Glacier.Inference.Gpu.GpuContext.IsSupported) return;
@@ -449,6 +454,7 @@ public class DiffusionGgufTests
     }
 
     [CudaFact(false)]
+    [Trait("Hardware", "Gpu")]
     public unsafe void GpuContext_VerifyRealGgufFluxGemm()
     {
         string fluxPath = @"C:\Users\spuri\source\repos\PolarsPlus\Glacier.Inference\models\flux1-schnell-Q4_K_S.gguf";
@@ -542,6 +548,7 @@ public class DiffusionGgufTests
     }
 
     [CudaFact(false)]
+    [Trait("Hardware", "Gpu")]
     public unsafe void GpuContext_VerifyBidirectionalFlashAttention()
     {
         if (!Glacier.Inference.Gpu.GpuContext.IsSupported) return;
@@ -666,6 +673,7 @@ public class DiffusionGgufTests
     }
 
     [CudaFact(false)]
+    [Trait("Hardware", "Gpu")]
     public unsafe void GpuContext_VerifyFluxFusedKernels()
     {
         if (!Glacier.Inference.Gpu.GpuContext.IsSupported) return;
@@ -906,6 +914,7 @@ public class DiffusionGgufTests
     }
 
     [CudaFact(false)]
+    [Trait("Hardware", "Gpu")]
     public unsafe void GpuContext_VerifyFluxQkvPrep()
     {
         if (!Glacier.Inference.Gpu.GpuContext.IsSupported) return;

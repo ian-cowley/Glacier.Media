@@ -116,10 +116,10 @@ public sealed class WhisperVoicePipelineTests
             probeTimeout: TimeSpan.FromMilliseconds(150));
 
         var ex1 = Assert.Throws<NotSupportedException>(() => engine.Transcribe(new float[160]));
-        Assert.Contains("WhisperEngine requires GGUF Whisper model weights", ex1.Message);
+        Assert.Contains("HTTP /v1/audio/transcriptions client proxy", ex1.Message);
 
         var ex2 = Assert.Throws<NotSupportedException>(() => engine.Transcribe(ReadOnlySpan<float>.Empty));
-        Assert.Contains("WhisperEngine requires GGUF Whisper model weights", ex2.Message);
+        Assert.Contains("no local GGUF/neural decoding", ex2.Message);
 
         await Assert.ThrowsAsync<NotSupportedException>(() => engine.TranscribeAsync(new float[160]));
         Assert.False(engine.HasRemoteClient);
@@ -129,7 +129,7 @@ public sealed class WhisperVoicePipelineTests
     }
 
     [Fact]
-    public void WhisperEngine_Dispose_ThrowsObjectDisposedAndRespectsClientOwnership()
+    public async Task WhisperEngine_Dispose_ThrowsObjectDisposedAndRespectsClientOwnership()
     {
         using var handler = new StubHttpHandler((_, _) =>
             Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
@@ -143,7 +143,7 @@ public sealed class WhisperVoicePipelineTests
         engine.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => engine.Transcribe(new float[16]));
-        Assert.Equal("ok", client.TranscribeAsync(new float[16]).GetAwaiter().GetResult());
+        Assert.Equal("ok", await client.TranscribeAsync(new float[16]));
     }
 
     [Fact]
